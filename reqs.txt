@@ -1,5 +1,0 @@
-ujson
-selenium>=4.11.2
-rich
-art
-pick
