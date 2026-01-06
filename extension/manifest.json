@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "JackFools (Local Training)",
+  "version": "0.1.0",
+  "description": "Local training assistant: sends page state to a localhost client and can apply UI overlays.",
+  "action": {
+    "default_title": "JackFools"
+  },
+  "options_page": "options.html",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "*://*.jackbox.tv/*", "*://jackbox.tv/*"],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.jackbox.tv/*", "*://jackbox.tv/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
+
+
+

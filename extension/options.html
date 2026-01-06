@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>JackFools Options</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 16px; max-width: 720px; }
+      label { display: block; margin-top: 12px; font-weight: 600; }
+      input { width: 100%; padding: 8px; margin-top: 6px; box-sizing: border-box; }
+      button { margin-top: 16px; padding: 10px 14px; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .note { margin-top: 10px; color: #444; font-size: 13px; line-height: 1.35; }
+      .status { margin-top: 12px; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <h2>JackFools (Local Training)</h2>
+    <div class="row">
+      <div>
+        <label for="port">Port</label>
+        <input id="port" inputmode="numeric" placeholder="27124" />
+      </div>
+      <div>
+        <label for="token">X-JF-Token</label>
+        <input id="token" placeholder="paste token from client output" />
+      </div>
+    </div>
+    <button id="save">Save</button>
+    <div class="status" id="status"></div>
+    <div class="note">
+      Client должен быть запущен локально: <code>jackfools serve</code>, и слушать только <code>127.0.0.1</code>.
+    </div>
+    <script src="options.js"></script>
+  </body>
+</html>
+
+
+
