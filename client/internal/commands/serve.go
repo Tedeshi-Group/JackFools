@@ -64,3 +64,4 @@ func mustGenerateToken(nBytes int) string { // Генератор токена.
 	return hex.EncodeToString(b) // Возвращаем hex-строку.
 } // Конец mustGenerateToken.
 
+

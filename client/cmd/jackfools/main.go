@@ -21,6 +21,8 @@ func main() { // Точка входа.
 		commands.Serve(os.Args[2:]) // Передаём оставшиеся аргументы в команду serve.
 	case "ddos": // Команда ddos.
 		commands.Ddos(os.Args[2:]) // Передаём оставшиеся аргументы в команду ddos.
+	case "botnet": // Команда botnet.
+		commands.Botnet(os.Args[2:]) // Передаём оставшиеся аргументы в команду botnet.
 	default: // Неизвестная команда.
 		printUsage() // Печатаем подсказку.
 		os.Exit(2)   // Выходим с кодом ошибки.
@@ -32,4 +34,5 @@ func printUsage() { // Печать справки.
 	fmt.Fprintln(os.Stderr, "Commands:")                              // Список команд.
 	fmt.Fprintln(os.Stderr, "  serve [--port 27124] [--token <hex>]") // Команда serve.
 	fmt.Fprintln(os.Stderr, "  ddos <code> [nickname]")               // Команда ddos.
+	fmt.Fprintln(os.Stderr, "  botnet <code> [num_clients]")          // Команда botnet.
 } // Конец printUsage.
