@@ -94,13 +94,24 @@ func handleTriviaDeath2Event(event *GameEvent, manager *BotnetManager) error { /
 
 	log.Printf("coordinator: Trivia Death 2 question: %s, choices: %d, roundType: %s", questionInfo.Prompt, len(questionInfo.Choices), questionInfo.RoundType) // Логируем информацию о вопросе.
 
+	// Выбираем нужную базу данных в зависимости от версии игры.
+	var answerDB *AnswerDatabase              // Переменная для базы обычных вопросов.
+	var finalRoundDB *AnswerDatabase          // Переменная для базы финального раунда.
+	if event.GameTag == "triviadeath2-tjsp" { // Если это версия TJSP.
+		answerDB = manager.answerDBTJSP         // Используем базу для TJSP.
+		finalRoundDB = manager.finalRoundDBTJSP // Используем базу финального раунда для TJSP.
+	} else { // Если это обычная версия triviadeath2.
+		answerDB = manager.answerDB         // Используем базу для обычной версии.
+		finalRoundDB = manager.finalRoundDB // Используем базу финального раунда для обычной версии.
+	} // Конец выбора базы данных.
+
 	// Проверяем, является ли это финальным раундом.
 	if questionInfo.RoundType == "FinalRound" { // Если это финальный раунд.
 		log.Printf("coordinator: detected Final Round question") // Логируем обнаружение финального раунда.
 		// Используем базу финального раунда для получения всех правильных ответов.
-		event.EventID = questionInfo.Prompt                                      // Устанавливаем EventID как текст вопроса для поиска в базе.
-		correctTexts, found := getFinalRoundAnswers(event, manager.finalRoundDB) // Получаем все тексты правильных ответов.
-		if found {                                                               // Если ответы найдены.
+		event.EventID = questionInfo.Prompt                              // Устанавливаем EventID как текст вопроса для поиска в базе.
+		correctTexts, found := getFinalRoundAnswers(event, finalRoundDB) // Получаем все тексты правильных ответов.
+		if found {                                                       // Если ответы найдены.
 			// Сопоставляем тексты вариантов ответов из вопроса с текстами правильных ответов из базы данных.
 			correctIndices := []int{}                           // Слайс для индексов правильных ответов в вопросе от сервера.
 			questionChoicesNormalized := []string{}             // Слайс для нормализованных текстов вариантов ответов из вопроса (для логирования).
@@ -127,7 +138,12 @@ func handleTriviaDeath2Event(event *GameEvent, manager *BotnetManager) error { /
 			} // Конец проверки наличия совпадений.
 			log.Printf("coordinator: found auto-answers for Final Round: %v (matched from DB texts: %v)", correctIndices, correctTexts) // Логируем найденные индексы после сопоставления.
 			// Отправляем команду всем клиентам с множественными индексами ответов.
-			return sendTriviaDeath2FinalRoundAnswerToAllClients(event, correctIndices, manager) // Отправляем ответы всем клиентам.
+			// Для нового формата используем специальную функцию.
+			if questionInfo.IsNewFormat { // Если это новый формат.
+				return sendTriviaDeath2FinalRoundAnswerToAllClientsNewFormat(event, correctIndices, manager) // Отправляем ответы всем клиентам (новый формат).
+			} else { // Если это старый формат.
+				return sendTriviaDeath2FinalRoundAnswerToAllClients(event, correctIndices, manager) // Отправляем ответы всем клиентам (старый формат).
+			} // Конец проверки формата.
 		} else { // Если ответы не найдены.
 			log.Printf("coordinator: no auto-answers found for Final Round, prompting user") // Логируем отсутствие автоматических ответов.
 			// Запрашиваем ответ у пользователя для финального раунда.
@@ -143,31 +159,62 @@ func handleTriviaDeath2Event(event *GameEvent, manager *BotnetManager) error { /
 
 			log.Printf("coordinator: user provided answers for Final Round: %v", userAnswers) // Логируем ответы пользователя.
 			// Отправляем ответы всем клиентам.
-			return sendTriviaDeath2FinalRoundAnswerToAllClients(event, userAnswers, manager) // Отправляем ответы всем клиентам.
+			// Для нового формата используем специальную функцию.
+			if questionInfo.IsNewFormat { // Если это новый формат.
+				return sendTriviaDeath2FinalRoundAnswerToAllClientsNewFormat(event, userAnswers, manager) // Отправляем ответы всем клиентам (новый формат).
+			} else { // Если это старый формат.
+				return sendTriviaDeath2FinalRoundAnswerToAllClients(event, userAnswers, manager) // Отправляем ответы всем клиентам (старый формат).
+			} // Конец проверки формата.
 		} // Конец проверки наличия автоматических ответов.
 	} // Конец проверки финального раунда.
 
 	// Обычный раунд - используем стандартную логику с одним правильным ответом.
 	// Пытаемся получить автоматический ответ из базы данных.
 	// Используем prompt как ключ для поиска ответа.
-	event.EventID = questionInfo.Prompt                     // Устанавливаем EventID как текст вопроса для поиска в базе.
-	answer, found := getAutoAnswer(event, manager.answerDB) // Получаем автоматический ответ.
-	if found {                                              // Если ответ найден.
+	event.EventID = questionInfo.Prompt             // Устанавливаем EventID как текст вопроса для поиска в базе.
+	answer, found := getAutoAnswer(event, answerDB) // Получаем автоматический ответ.
+	if found {                                      // Если ответ найден.
 		log.Printf("coordinator: found auto-answer for Trivia Death 2: %s", answer) // Логируем найденный автоматический ответ.
-		// Пытаемся преобразовать ответ в индекс (если это число).
-		var answerIndex int                               // Переменная для индекса ответа.
-		if idx, err := strconv.Atoi(answer); err == nil { // Если ответ - это число.
-			answerIndex = idx // Используем число как индекс.
-		} else { // Если ответ не число, ищем текст в choices.
-			answerIndex = findAnswerIndex(answer, questionInfo.Choices) // Находим индекс ответа по тексту.
-		} // Конец проверки формата ответа.
 
-		if answerIndex >= 0 && answerIndex < len(questionInfo.Choices) { // Если индекс найден и в допустимом диапазоне.
-			// Отправляем команду всем клиентам с индексом ответа.
-			return sendTriviaDeath2AnswerToAllClients(event, answerIndex, manager) // Отправляем ответ всем клиентам.
-		} else { // Если индекс не найден или вне диапазона.
-			log.Printf("coordinator: answer '%s' (index %d) not found in choices or out of range, prompting user", answer, answerIndex) // Логируем отсутствие ответа в вариантах.
-		} // Конец проверки индекса.
+		// Для нового формата (triviadeath2) используем ключи вместо индексов.
+		if questionInfo.IsNewFormat { // Если это новый формат.
+			// Ищем текст ответа в choices и находим соответствующий ключ.
+			answerKey := ""                                   // Переменная для ключа ответа.
+			for i, choiceText := range questionInfo.Choices { // Проходим по каждому варианту ответа.
+				// Нормализуем тексты для сравнения.
+				normalizedAnswer := normalizeAnswerText(answer)     // Нормализуем ответ из базы.
+				normalizedChoice := normalizeAnswerText(choiceText) // Нормализуем вариант ответа.
+				if normalizedAnswer == normalizedChoice {           // Если тексты совпадают.
+					if i < len(questionInfo.ChoiceKeys) { // Если индекс в пределах массива ключей.
+						answerKey = questionInfo.ChoiceKeys[i] // Получаем ключ ответа.
+						break                                  // Прерываем цикл.
+					} // Конец проверки индекса.
+				} // Конец проверки совпадения.
+			} // Конец цикла по вариантам.
+
+			if answerKey != "" { // Если ключ найден.
+				log.Printf("coordinator: found answer key for new format: %s", answerKey) // Логируем найденный ключ.
+				// Отправляем команду всем клиентам с ключом ответа.
+				return sendTriviaDeath2AnswerToAllClientsNewFormat(event, answerKey, manager) // Отправляем ответ всем клиентам.
+			} else { // Если ключ не найден.
+				log.Printf("coordinator: answer '%s' not found in choices for new format, prompting user", answer) // Логируем отсутствие ответа в вариантах.
+			} // Конец проверки ключа.
+		} else { // Если это старый формат (triviadeath2-tjsp).
+			// Пытаемся преобразовать ответ в индекс (если это число).
+			var answerIndex int                               // Переменная для индекса ответа.
+			if idx, err := strconv.Atoi(answer); err == nil { // Если ответ - это число.
+				answerIndex = idx // Используем число как индекс.
+			} else { // Если ответ не число, ищем текст в choices.
+				answerIndex = findAnswerIndex(answer, questionInfo.Choices) // Находим индекс ответа по тексту.
+			} // Конец проверки формата ответа.
+
+			if answerIndex >= 0 && answerIndex < len(questionInfo.Choices) { // Если индекс найден и в допустимом диапазоне.
+				// Отправляем команду всем клиентам с индексом ответа.
+				return sendTriviaDeath2AnswerToAllClients(event, answerIndex, manager) // Отправляем ответ всем клиентам.
+			} else { // Если индекс не найден или вне диапазона.
+				log.Printf("coordinator: answer '%s' (index %d) not found in choices or out of range, prompting user", answer, answerIndex) // Логируем отсутствие ответа в вариантах.
+			} // Конец проверки индекса.
+		} // Конец проверки формата.
 	} // Конец проверки наличия автоматического ответа.
 
 	// Если автоматический ответ не найден, запрашиваем у пользователя.
@@ -186,15 +233,28 @@ func handleTriviaDeath2Event(event *GameEvent, manager *BotnetManager) error { /
 
 	log.Printf("coordinator: user provided answer index: %d", userAnswer) // Логируем ответ пользователя.
 
-	// Отправляем ответ всем клиентам.
-	return sendTriviaDeath2AnswerToAllClients(event, userAnswer, manager) // Отправляем ответ всем клиентам.
+	// Для нового формата отправляем ключ вместо индекса.
+	if questionInfo.IsNewFormat { // Если это новый формат.
+		if userAnswer >= 0 && userAnswer < len(questionInfo.ChoiceKeys) { // Если индекс в пределах массива ключей.
+			answerKey := questionInfo.ChoiceKeys[userAnswer]                              // Получаем ключ ответа.
+			return sendTriviaDeath2AnswerToAllClientsNewFormat(event, answerKey, manager) // Отправляем ответ всем клиентам.
+		} else { // Если индекс вне диапазона.
+			log.Printf("coordinator: user answer index %d out of range for new format", userAnswer) // Логируем ошибку.
+			return nil                                                                              // Возвращаем nil.
+		} // Конец проверки индекса.
+	} else { // Если это старый формат.
+		// Отправляем ответ всем клиентам.
+		return sendTriviaDeath2AnswerToAllClients(event, userAnswer, manager) // Отправляем ответ всем клиентам.
+	} // Конец проверки формата.
 } // Конец handleTriviaDeath2Event.
 
 // TriviaDeath2QuestionInfo содержит информацию о вопросе Trivia Death 2.
 type TriviaDeath2QuestionInfo struct { // Структура информации о вопросе.
-	Prompt    string   // Текст вопроса.
-	Choices   []string // Варианты ответов.
-	RoundType string   // Тип раунда (например, "FinalRound" для финального раунда).
+	Prompt      string   // Текст вопроса.
+	Choices     []string // Варианты ответов (текст для отображения).
+	ChoiceKeys  []string // Ключи вариантов ответов (для triviadeath2 используется key вместо индекса).
+	RoundType   string   // Тип раунда (например, "FinalRound" для финального раунда).
+	IsNewFormat bool     // Флаг нового формата (triviadeath2 использует key вместо индекса).
 } // Конец TriviaDeath2QuestionInfo.
 
 // extractTriviaDeath2Question извлекает информацию о вопросе из события Trivia Death 2.
@@ -205,9 +265,69 @@ func extractTriviaDeath2Question(event *GameEvent) *TriviaDeath2QuestionInfo { /
 		return nil // Возвращаем nil.
 	} // Конец проверки параметров.
 
-	// Формат 1: opcode "object" с result.key == "audiencePlayer" и result.val.
+	// Формат для triviadeath2 (новый): opcode "object" с result.key == "bc:room" и result.val.audience.
 	if event.Type == "object" { // Если opcode = "object".
-		if key, ok := event.Payload["key"].(string); ok && key == "audiencePlayer" { // Если key = "audiencePlayer".
+		if key, ok := event.Payload["key"].(string); ok && key == "bc:room" { // Если key = "bc:room" (новый формат triviadeath2).
+			if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
+				if audience, ok := val["audience"].(map[string]interface{}); ok { // Если есть audience.
+					if state, ok := audience["state"].(string); ok && state == "MakeSingleChoice" { // Если state = "MakeSingleChoice".
+						// Извлекаем roundType (тип раунда).
+						roundType := ""                                   // Переменная для типа раунда.
+						if rt, ok := audience["roundType"].(string); ok { // Если есть roundType.
+							roundType = rt // Устанавливаем тип раунда.
+						} // Конец проверки roundType.
+
+						// Извлекаем prompt (текст вопроса).
+						prompt := ""                                                          // Переменная для текста вопроса.
+						if promptObj, ok := audience["prompt"].(map[string]interface{}); ok { // Если prompt - это объект с html.
+							if promptHTML, ok := promptObj["html"].(string); ok { // Если есть html.
+								prompt = promptHTML // Устанавливаем текст вопроса.
+							} // Конец проверки html.
+						} else if promptStr, ok := audience["prompt"].(string); ok { // Если prompt - это строка.
+							prompt = promptStr // Устанавливаем текст вопроса.
+						} // Конец проверки prompt.
+
+						// Извлекаем choices (варианты ответов).
+						// В новом формате choices могут быть просто массивами с html, без key.
+						choices := []string{}                                           // Слайс для текстов вариантов ответов.
+						choiceKeys := []string{}                                        // Слайс для ключей вариантов ответов (может быть пустым).
+						if choicesData, ok := audience["choices"].([]interface{}); ok { // Если есть choices.
+							for _, choiceItem := range choicesData { // Проходим по каждому варианту.
+								if choiceMap, ok := choiceItem.(map[string]interface{}); ok { // Если вариант - это map.
+									// Извлекаем текст (html).
+									choiceText := ""                                   // Переменная для текста варианта.
+									if htmlObj, ok := choiceMap["html"].(string); ok { // Если есть html.
+										choiceText = htmlObj // Устанавливаем текст.
+									} // Конец проверки html.
+									// Извлекаем ключ (может отсутствовать в финальном раунде).
+									choiceKey := ""                                  // Переменная для ключа варианта.
+									if keyStr, ok := choiceMap["key"].(string); ok { // Если есть key.
+										choiceKey = keyStr // Устанавливаем ключ.
+									} // Конец проверки key.
+									if choiceText != "" { // Если есть текст (ключ может отсутствовать).
+										choices = append(choices, choiceText)      // Добавляем текст варианта ответа.
+										choiceKeys = append(choiceKeys, choiceKey) // Добавляем ключ (может быть пустым).
+									} // Конец проверки наличия текста.
+								} // Конец проверки choiceMap.
+							} // Конец цикла по вариантам.
+						} // Конец проверки choices.
+
+						if prompt != "" && len(choices) > 0 { // Если есть вопрос и варианты ответов.
+							return &TriviaDeath2QuestionInfo{ // Возвращаем информацию о вопросе.
+								Prompt:      prompt,     // Устанавливаем текст вопроса.
+								Choices:     choices,    // Устанавливаем варианты ответов (текст).
+								ChoiceKeys:  choiceKeys, // Устанавливаем ключи вариантов ответов (может быть пустым).
+								RoundType:   roundType,  // Устанавливаем тип раунда.
+								IsNewFormat: true,       // Устанавливаем флаг нового формата.
+							} // Конец создания информации о вопросе.
+						} // Конец проверки наличия вопроса и вариантов.
+					} // Конец проверки state.
+				} // Конец проверки audience.
+			} // Конец проверки val.
+		} // Конец проверки key "bc:room".
+
+		// Формат для triviadeath2-tjsp: opcode "object" с result.key == "audiencePlayer" и result.val.
+		if key, ok := event.Payload["key"].(string); ok && key == "audiencePlayer" { // Если key = "audiencePlayer" (старый формат triviadeath2-tjsp).
 			if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
 				// Проверяем roundType перед проверкой hasSubmit.
 				roundType := ""                              // Переменная для типа раунда.
@@ -247,9 +367,11 @@ func extractTriviaDeath2Question(event *GameEvent) *TriviaDeath2QuestionInfo { /
 				// roundType уже извлечён выше, используем его.
 				if prompt != "" && len(choices) > 0 { // Если есть вопрос и варианты ответов.
 					return &TriviaDeath2QuestionInfo{ // Возвращаем информацию о вопросе.
-						Prompt:    prompt,    // Устанавливаем текст вопроса.
-						Choices:   choices,   // Устанавливаем варианты ответов.
-						RoundType: roundType, // Устанавливаем тип раунда.
+						Prompt:      prompt,    // Устанавливаем текст вопроса.
+						Choices:     choices,   // Устанавливаем варианты ответов.
+						ChoiceKeys:  nil,       // Ключи не используются в старом формате.
+						RoundType:   roundType, // Устанавливаем тип раунда.
+						IsNewFormat: false,     // Старый формат (triviadeath2-tjsp).
 					} // Конец создания информации о вопросе.
 				} // Конец проверки наличия вопроса и вариантов.
 			} // Конец проверки val.
@@ -292,9 +414,11 @@ func extractTriviaDeath2Question(event *GameEvent) *TriviaDeath2QuestionInfo { /
 
 					if prompt != "" && len(choices) > 0 { // Если есть вопрос и варианты ответов.
 						return &TriviaDeath2QuestionInfo{ // Возвращаем информацию о вопросе.
-							Prompt:    prompt,    // Устанавливаем текст вопроса.
-							Choices:   choices,   // Устанавливаем варианты ответов.
-							RoundType: roundType, // Устанавливаем тип раунда.
+							Prompt:      prompt,    // Устанавливаем текст вопроса.
+							Choices:     choices,   // Устанавливаем варианты ответов.
+							ChoiceKeys:  nil,       // Ключи не используются в старом формате.
+							RoundType:   roundType, // Устанавливаем тип раунда.
+							IsNewFormat: false,     // Старый формат (triviadeath2-tjsp).
 						} // Конец создания информации о вопросе.
 					} // Конец проверки наличия вопроса и вариантов.
 				} // Конец проверки val.
@@ -498,6 +622,62 @@ func sendTriviaDeath2AnswerToAllClients(event *GameEvent, answerIndex int, manag
 	return nil // Возвращаем nil (ошибки нет).
 } // Конец sendTriviaDeath2AnswerToAllClients.
 
+// sendTriviaDeath2AnswerToAllClientsNewFormat отправляет ответ Trivia Death 2 (новый формат) всем клиентам.
+// Для нового формата используется ключ (key) вместо индекса.
+// Принимает событие игры, ключ ответа и менеджер ботнета.
+// Возвращает ошибку, если отправка не удалась.
+func sendTriviaDeath2AnswerToAllClientsNewFormat(event *GameEvent, answerKey string, manager *BotnetManager) error { // Функция отправки ответа всем клиентам (новый формат).
+	if event == nil || manager == nil { // Если событие или менеджер nil.
+		return fmt.Errorf("event or manager is nil") // Возвращаем ошибку.
+	} // Конец проверки параметров.
+
+	if answerKey == "" { // Если ключ ответа пустой.
+		return fmt.Errorf("answer key is empty") // Возвращаем ошибку.
+	} // Конец проверки ключа.
+
+	// Создаём команду для клиентов.
+	// Для нового формата Trivia Death 2 нужно отправить ключ выбранного ответа.
+	cmd := ClientCommand{ // Создаём команду.
+		Type:    "answer",                     // Устанавливаем тип команды.
+		EventID: event.EventID,                // Устанавливаем ID события.
+		Answer:  answerKey,                    // Устанавливаем ответ как ключ.
+		Payload: make(map[string]interface{}), // Инициализируем payload.
+	} // Конец создания команды.
+
+	// Добавляем дополнительную информацию в payload.
+	cmd.Payload["gameTag"] = event.GameTag // Добавляем тег игры.
+	cmd.Payload["eventType"] = event.Type  // Добавляем тип события.
+	cmd.Payload["answerKey"] = answerKey   // Добавляем ключ ответа.
+	cmd.Payload["isNewFormat"] = true      // Устанавливаем флаг нового формата.
+
+	// Отправляем команду всем подключенным клиентам через канал.
+	manager.mu.RLock()                  // Блокируем мьютекс для чтения.
+	clientCount := len(manager.clients) // Получаем количество подключенных клиентов.
+	manager.mu.RUnlock()                // Разблокируем мьютекс.
+
+	if clientCount == 0 { // Если клиентов ещё нет.
+		log.Printf("coordinator: no clients connected yet, skipping answer") // Логируем пропуск ответа.
+		return nil                                                           // Возвращаем nil (ошибки нет, просто клиентов нет).
+	} // Конец проверки количества клиентов.
+
+	log.Printf("coordinator: sending Trivia Death 2 answer (key %s) to %d clients", answerKey, clientCount) // Логируем отправку ответа.
+
+	// Отправляем команду в канал для каждого подключенного клиента.
+	// Каждый клиент слушает канал и получит команду.
+	for i := 0; i < clientCount; i++ { // Проходим по количеству клиентов.
+		select { // Выбираем между контекстом и отправкой команды.
+		case <-manager.ctx.Done(): // Если контекст отменён.
+			return fmt.Errorf("context canceled") // Возвращаем ошибку.
+		case manager.commandChan <- cmd: // Если команда отправлена в канал.
+			// Команда успешно отправлена.
+		} // Конец select.
+	} // Конец цикла отправки.
+
+	log.Printf("coordinator: Trivia Death 2 answer (new format) sent to all clients") // Логируем успешную отправку.
+
+	return nil // Возвращаем nil (ошибки нет).
+} // Конец sendTriviaDeath2AnswerToAllClientsNewFormat.
+
 // sendTriviaDeath2FinalRoundAnswerToAllClients отправляет ответы финального раунда Trivia Death 2 всем клиентам.
 // В финальном раунде может быть несколько правильных ответов.
 // Принимает событие игры, слайс индексов ответов и менеджер ботнета.
@@ -561,6 +741,72 @@ func sendTriviaDeath2FinalRoundAnswerToAllClients(event *GameEvent, answerIndice
 
 	return nil // Возвращаем nil (ошибки нет).
 } // Конец sendTriviaDeath2FinalRoundAnswerToAllClients.
+
+// sendTriviaDeath2FinalRoundAnswerToAllClientsNewFormat отправляет ответы финального раунда Trivia Death 2 (новый формат) всем клиентам.
+// В финальном раунде может быть несколько правильных ответов.
+// Для нового формата используется name="TriviaDeath2 Vote" и индексы через запятую.
+// Принимает событие игры, слайс индексов ответов и менеджер ботнета.
+// Возвращает ошибку, если отправка не удалась.
+func sendTriviaDeath2FinalRoundAnswerToAllClientsNewFormat(event *GameEvent, answerIndices []int, manager *BotnetManager) error { // Функция отправки ответов финального раунда всем клиентам (новый формат).
+	if event == nil || manager == nil { // Если событие или менеджер nil.
+		return fmt.Errorf("event or manager is nil") // Возвращаем ошибку.
+	} // Конец проверки параметров.
+
+	// Создаём строку с индексами через запятую (например, "0,1" или "" для пустого массива).
+	var voteString string        // Переменная для строки с индексами.
+	if len(answerIndices) == 0 { // Если индексы ответов пусты.
+		voteString = "" // Устанавливаем пустую строку.
+	} else { // Если есть индексы.
+		indexStrings := make([]string, len(answerIndices)) // Создаём слайс строк для индексов.
+		for i, idx := range answerIndices {                // Проходим по каждому индексу.
+			indexStrings[i] = fmt.Sprintf("%d", idx) // Преобразуем индекс в строку.
+		} // Конец цикла.
+		voteString = strings.Join(indexStrings, ",") // Объединяем индексы через запятую.
+	} // Конец проверки наличия индексов.
+
+	// Создаём команду для клиентов.
+	// Для финального раунда Trivia Death 2 (новый формат) нужно отправить строку с индексами через запятую.
+	cmd := ClientCommand{ // Создаём команду.
+		Type:    "answer",                     // Устанавливаем тип команды.
+		EventID: event.EventID,                // Устанавливаем ID события.
+		Answer:  voteString,                   // Устанавливаем ответ как строку с индексами через запятую.
+		Payload: make(map[string]interface{}), // Инициализируем payload.
+	} // Конец создания команды.
+
+	// Добавляем дополнительную информацию в payload.
+	cmd.Payload["gameTag"] = event.GameTag       // Добавляем тег игры.
+	cmd.Payload["eventType"] = event.Type        // Добавляем тип события.
+	cmd.Payload["answerIndices"] = answerIndices // Добавляем слайс индексов ответов.
+	cmd.Payload["isFinalRound"] = true           // Устанавливаем флаг финального раунда.
+	cmd.Payload["isNewFormat"] = true            // Устанавливаем флаг нового формата.
+
+	// Отправляем команду всем подключенным клиентам через канал.
+	manager.mu.RLock()                  // Блокируем мьютекс для чтения.
+	clientCount := len(manager.clients) // Получаем количество подключенных клиентов.
+	manager.mu.RUnlock()                // Разблокируем мьютекс.
+
+	if clientCount == 0 { // Если клиентов ещё нет.
+		log.Printf("coordinator: no clients connected yet, skipping final round answer") // Логируем пропуск ответа.
+		return nil                                                                       // Возвращаем nil (ошибки нет, просто клиентов нет).
+	} // Конец проверки количества клиентов.
+
+	log.Printf("coordinator: sending Trivia Death 2 Final Round answer (new format, indices %v) to %d clients", answerIndices, clientCount) // Логируем отправку ответов.
+
+	// Отправляем команду в канал для каждого подключенного клиента.
+	// Каждый клиент слушает канал и получит команду.
+	for i := 0; i < clientCount; i++ { // Проходим по количеству клиентов.
+		select { // Выбираем между контекстом и отправкой команды.
+		case <-manager.ctx.Done(): // Если контекст отменён.
+			return fmt.Errorf("context canceled") // Возвращаем ошибку.
+		case manager.commandChan <- cmd: // Если команда отправлена в канал.
+			// Команда успешно отправлена.
+		} // Конец select.
+	} // Конец цикла отправки.
+
+	log.Printf("coordinator: Trivia Death 2 Final Round answer (new format) sent to all clients") // Логируем успешную отправку.
+
+	return nil // Возвращаем nil (ошибки нет).
+} // Конец sendTriviaDeath2FinalRoundAnswerToAllClientsNewFormat.
 
 // sendEverydayAnswerToAllClients отправляет ответ Everyday всем клиентам.
 // Принимает событие игры, key и times, и менеджер ботнета.

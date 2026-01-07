@@ -164,12 +164,37 @@ func shouldRequireAnswer(event *GameEvent) bool { // Функция опреде
 	} // Конец проверки события.
 
 	// Для triviadeath2-tjsp проверяем наличие audiencePlayer с hasSubmit: false.
+	// Для triviadeath2 (новый формат) проверяем наличие bc:room с audience.state == "MakeSingleChoice".
 	// Проверяем gameTag или если он пустой, но тип события "object" - тоже проверяем (gameTag может быть кеширован).
 	if event.GameTag == "triviadeath2-tjsp" || strings.Contains(event.GameTag, "triviadeath2") || event.Type == "object" { // Если это Trivia Death 2 или событие типа "object".
 		if event.Payload != nil { // Если payload не nil.
-			// Формат 1: opcode "object" с result.key == "audiencePlayer" и result.val.
+			// Формат для triviadeath2 (новый): opcode "object" с result.key == "bc:room" и result.val.audience.state == "MakeSingleChoice".
 			if event.Type == "object" { // Если opcode = "object".
-				if key, ok := event.Payload["key"].(string); ok && key == "audiencePlayer" { // Если key = "audiencePlayer".
+				if key, ok := event.Payload["key"].(string); ok && key == "bc:room" { // Если key = "bc:room" (новый формат triviadeath2).
+					if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
+						if audience, ok := val["audience"].(map[string]interface{}); ok { // Если есть audience.
+							if state, ok := audience["state"].(string); ok && state == "MakeSingleChoice" { // Если state = "MakeSingleChoice".
+								// Проверяем, есть ли prompt и choices.
+								hasPrompt := false                                                    // Флаг наличия prompt.
+								if promptObj, ok := audience["prompt"].(map[string]interface{}); ok { // Если prompt - это объект.
+									if promptHTML, ok := promptObj["html"].(string); ok && promptHTML != "" { // Если есть html и он не пустой.
+										hasPrompt = true // Устанавливаем флаг.
+									} // Конец проверки html.
+								} else if promptStr, ok := audience["prompt"].(string); ok && promptStr != "" { // Если prompt - это строка.
+									hasPrompt = true // Устанавливаем флаг.
+								} // Конец проверки prompt.
+								if choices, ok := audience["choices"].([]interface{}); ok && len(choices) > 0 { // Если есть choices.
+									if hasPrompt { // Если есть prompt.
+										return true // Требует ответа.
+									} // Конец проверки prompt.
+								} // Конец проверки choices.
+							} // Конец проверки state.
+						} // Конец проверки audience.
+					} // Конец проверки val.
+				} // Конец проверки key "bc:room".
+
+				// Формат для triviadeath2-tjsp: opcode "object" с result.key == "audiencePlayer" и result.val.
+				if key, ok := event.Payload["key"].(string); ok && key == "audiencePlayer" { // Если key = "audiencePlayer" (старый формат triviadeath2-tjsp).
 					if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
 						// Проверяем roundType для финального раунда.
 						roundType := ""                              // Переменная для типа раунда.

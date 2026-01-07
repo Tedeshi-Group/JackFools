@@ -24,16 +24,18 @@ import ( // Начинаем блок импортов.
 // BotnetManager управляет всеми подключениями ботнета.
 // Координирует работу координатора и клиентов.
 type BotnetManager struct { // Структура менеджера ботнета.
-	mu            sync.RWMutex            // Мьютекс для защиты общих данных.
-	coordinator   *websocket.Conn         // WebSocket соединение координатора.
-	clients       map[int]*websocket.Conn // Карта клиентов по их ID.
-	ctx           context.Context         // Контекст для отмены операций.
-	cancel        context.CancelFunc      // Функция отмены контекста.
-	answerDB      *AnswerDatabase         // База правильных ответов (обычные вопросы).
-	finalRoundDB  *AnswerDatabase         // База правильных ответов для финального раунда.
-	commandChan   chan ClientCommand      // Канал для отправки команд клиентам.
-	gameTag       string                  // Кешированный тег игры (извлекается из первого сообщения).
-	everydayTimes int                     // Счётчик times для игры Everyday (начинается с 50, увеличивается).
+	mu               sync.RWMutex            // Мьютекс для защиты общих данных.
+	coordinator      *websocket.Conn         // WebSocket соединение координатора.
+	clients          map[int]*websocket.Conn // Карта клиентов по их ID.
+	ctx              context.Context         // Контекст для отмены операций.
+	cancel           context.CancelFunc      // Функция отмены контекста.
+	answerDB         *AnswerDatabase         // База правильных ответов для triviadeath2 (обычные вопросы).
+	finalRoundDB     *AnswerDatabase         // База правильных ответов для triviadeath2 (финальный раунд).
+	answerDBTJSP     *AnswerDatabase         // База правильных ответов для triviadeath2-tjsp (обычные вопросы).
+	finalRoundDBTJSP *AnswerDatabase         // База правильных ответов для triviadeath2-tjsp (финальный раунд).
+	commandChan      chan ClientCommand      // Канал для отправки команд клиентам.
+	gameTag          string                  // Кешированный тег игры (извлекается из первого сообщения).
+	everydayTimes    int                     // Счётчик times для игры Everyday (начинается с 50, увеличивается).
 } // Конец BotnetManager.
 
 // ClientCommand представляет команду, которую координатор отправляет клиентам.
@@ -140,18 +142,36 @@ func Botnet(args []string) { // Реализация команды botnet.
 		cancel()                                                       // Отменяем контекст, что приведёт к закрытию всех подключений.
 	}() // Запускаем горутину.
 
-	// Загружаем базу ответов онлайн (обычные вопросы).
-	answersURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/efdfff41ea60cb6b93cc03cfad09ededefd22f4e/triviadeath2-tjsp-questions.json" // URL для загрузки базы ответов для Trivia Death 2.
-	answerDB, err := loadAnswerDatabase(answersURL)                                                                                                                            // Загружаем базу ответов.
-	if err != nil {                                                                                                                                                            // Если не удалось загрузить базу ответов.
+	// Загружаем базу ответов для triviadeath2-tjsp (обычные вопросы).
+	answersURLTJSP := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/efdfff41ea60cb6b93cc03cfad09ededefd22f4e/triviadeath2-tjsp-questions.json" // URL для загрузки базы ответов для Trivia Death 2 TJSP.
+	answerDBTJSP, err := loadAnswerDatabase(answersURLTJSP)                                                                                                                        // Загружаем базу ответов для TJSP.
+	if err != nil {                                                                                                                                                                // Если не удалось загрузить базу ответов.
+		log.Printf("warning: failed to load TJSP answer database: %v, continuing without auto-answers", err) // Логируем предупреждение.
+		answerDBTJSP = &AnswerDatabase{}                                                                     // Создаём пустую базу ответов.
+	} // Конец проверки загрузки базы ответов.
+
+	// Загружаем базу ответов для triviadeath2-tjsp (финальный раунд).
+	finalRoundURLTJSP := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/ea10557f20c3cb9662ed8842892f163129574f74/triviadeath2-tjsp-final.json" // URL для загрузки базы ответов финального раунда для TJSP.
+	finalRoundDBTJSP, err := loadFinalRoundDatabase(finalRoundURLTJSP)                                                                                                            // Загружаем базу ответов финального раунда для TJSP.
+	if err != nil {                                                                                                                                                               // Если не удалось загрузить базу ответов финального раунда.
+		log.Printf("warning: failed to load TJSP final round database: %v, continuing without final round auto-answers", err) // Логируем предупреждение.
+		finalRoundDBTJSP = &AnswerDatabase{                                                                                   // Создаём пустую базу ответов.
+			FinalRoundQuestions: make(map[string][]string), // Инициализируем карту вопросов финального раунда.
+		} // Конец создания базы.
+	} // Конец проверки загрузки базы ответов финального раунда.
+
+	// Загружаем базу ответов для triviadeath2 (обычные вопросы).
+	answersURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/bfa1c18b64e1f13997d34950a5353b7c0839cbda/triviadeath2-questions.json" // URL для загрузки базы ответов для Trivia Death 2.
+	answerDB, err := loadAnswerDatabase(answersURL)                                                                                                                       // Загружаем базу ответов.
+	if err != nil {                                                                                                                                                       // Если не удалось загрузить базу ответов.
 		log.Printf("warning: failed to load answer database: %v, continuing without auto-answers", err) // Логируем предупреждение.
 		answerDB = &AnswerDatabase{}                                                                    // Создаём пустую базу ответов.
 	} // Конец проверки загрузки базы ответов.
 
-	// Загружаем базу ответов для финального раунда.
-	finalRoundURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/ea10557f20c3cb9662ed8842892f163129574f74/triviadeath2-tjsp-final.json" // URL для загрузки базы ответов финального раунда.
-	finalRoundDB, err := loadFinalRoundDatabase(finalRoundURL)                                                                                                                // Загружаем базу ответов финального раунда.
-	if err != nil {                                                                                                                                                           // Если не удалось загрузить базу ответов финального раунда.
+	// Загружаем базу ответов для triviadeath2 (финальный раунд).
+	finalRoundURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/bfa1c18b64e1f13997d34950a5353b7c0839cbda/triviadeath2-final.json" // URL для загрузки базы ответов финального раунда.
+	finalRoundDB, err := loadFinalRoundDatabase(finalRoundURL)                                                                                                           // Загружаем базу ответов финального раунда.
+	if err != nil {                                                                                                                                                      // Если не удалось загрузить базу ответов финального раунда.
 		log.Printf("warning: failed to load final round database: %v, continuing without final round auto-answers", err) // Логируем предупреждение.
 		finalRoundDB = &AnswerDatabase{                                                                                  // Создаём пустую базу ответов.
 			FinalRoundQuestions: make(map[string][]string), // Инициализируем карту вопросов финального раунда.
@@ -160,14 +180,16 @@ func Botnet(args []string) { // Реализация команды botnet.
 
 	// Создаём менеджер ботнета.
 	manager := &BotnetManager{ // Создаём менеджер.
-		clients:       make(map[int]*websocket.Conn), // Инициализируем карту клиентов.
-		ctx:           ctx,                           // Устанавливаем контекст.
-		cancel:        cancel,                        // Устанавливаем функцию отмены.
-		answerDB:      answerDB,                      // Устанавливаем базу ответов (обычные вопросы).
-		finalRoundDB:  finalRoundDB,                  // Устанавливаем базу ответов для финального раунда.
-		commandChan:   make(chan ClientCommand, 100), // Создаём канал для команд (буфер 100).
-		everydayTimes: 50,                            // Инициализируем счётчик times для Everyday (начинаем с 50).
-		gameTag:       roomInfo.AppTag,               // Устанавливаем тег игры из информации о комнате (если доступен).
+		clients:          make(map[int]*websocket.Conn), // Инициализируем карту клиентов.
+		ctx:              ctx,                           // Устанавливаем контекст.
+		cancel:           cancel,                        // Устанавливаем функцию отмены.
+		answerDB:         answerDB,                      // Устанавливаем базу ответов для triviadeath2 (обычные вопросы).
+		finalRoundDB:     finalRoundDB,                  // Устанавливаем базу ответов для triviadeath2 (финальный раунд).
+		answerDBTJSP:     answerDBTJSP,                  // Устанавливаем базу ответов для triviadeath2-tjsp (обычные вопросы).
+		finalRoundDBTJSP: finalRoundDBTJSP,              // Устанавливаем базу ответов для triviadeath2-tjsp (финальный раунд).
+		commandChan:      make(chan ClientCommand, 100), // Создаём канал для команд (буфер 100).
+		everydayTimes:    50,                            // Инициализируем счётчик times для Everyday (начинаем с 50).
+		gameTag:          roomInfo.AppTag,               // Устанавливаем тег игры из информации о комнате (если доступен).
 	} // Конец создания менеджера.
 
 	// Подключаем координатора.
@@ -440,9 +462,44 @@ func sendClientResponse(conn *websocket.Conn, cmd ClientCommand) error { // Фу
 			}, // Конец параметров.
 		} // Конец создания сообщения.
 	} else if gameTag, ok := cmd.Payload["gameTag"].(string); ok && (gameTag == "triviadeath2-tjsp" || strings.Contains(gameTag, "triviadeath2")) { // Если это Trivia Death 2.
-		// Проверяем, является ли это финальным раундом.
-		isFinalRound, _ := cmd.Payload["isFinalRound"].(bool) // Получаем флаг финального раунда.
-		if isFinalRound {                                     // Если это финальный раунд.
+		// Проверяем, является ли это новым форматом (triviadeath2 без -tjsp).
+		isNewFormat, _ := cmd.Payload["isNewFormat"].(bool)                                             // Получаем флаг нового формата.
+		isFinalRound, _ := cmd.Payload["isFinalRound"].(bool)                                           // Получаем флаг финального раунда.
+		if isNewFormat && gameTag != "triviadeath2-tjsp" && strings.Contains(gameTag, "triviadeath2") { // Если это новый формат (triviadeath2, не tjsp).
+			if isFinalRound { // Если это финальный раунд нового формата.
+				// Для финального раунда нового формата используем индексы через запятую.
+				voteString := cmd.Answer // Используем строку ответа напрямую (уже содержит индексы через запятую, например "0,1").
+
+				// Формируем сообщение в формате Trivia Death 2 для финального раунда (новый формат).
+				message = map[string]interface{}{ // Создаём карту для сообщения.
+					"seq":    1,                                // Порядковый номер сообщения (начинаем с 1).
+					"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
+					"params": map[string]interface{}{ // Параметры сообщения.
+						"name":  "TriviaDeath2 Vote", // Имя группы подсчёта (новый формат).
+						"vote":  voteString,          // Индексы выбранных ответов через запятую (например, "0,1").
+						"times": 1,                   // Количество раз (всегда 1).
+					}, // Конец параметров.
+				} // Конец создания сообщения.
+			} else { // Если это обычный раунд нового формата.
+				// Для нового формата используем ключ ответа вместо индекса.
+				answerKey, ok := cmd.Payload["answerKey"].(string) // Получаем ключ ответа.
+				if !ok {                                           // Если ключ не найден.
+					// Используем Answer как ключ.
+					answerKey = cmd.Answer // Используем Answer как ключ.
+				} // Конец проверки ключа.
+
+				// Формируем сообщение в формате Trivia Death 2 (новый формат).
+				message = map[string]interface{}{ // Создаём карту для сообщения.
+					"seq":    1,                                // Порядковый номер сообщения (начинаем с 1).
+					"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
+					"params": map[string]interface{}{ // Параметры сообщения.
+						"name":  "TriviaDeath2 Vote", // Имя группы подсчёта (новый формат).
+						"vote":  answerKey,           // Ключ выбранного ответа (например, "Ризеншнауцер").
+						"times": 1,                   // Количество раз (всегда 1).
+					}, // Конец параметров.
+				} // Конец создания сообщения.
+			} // Конец проверки финального раунда.
+		} else if isFinalRound { // Если это финальный раунд (старый формат triviadeath2-tjsp).
 			// Для финального раунда используем строку с индексами через запятую (например, "1,2").
 			voteString := cmd.Answer // Используем строку ответа напрямую (уже содержит индексы через запятую).
 
@@ -456,7 +513,7 @@ func sendClientResponse(conn *websocket.Conn, cmd ClientCommand) error { // Фу
 					"times": 1,                            // Количество раз (всегда 1).
 				}, // Конец параметров.
 			} // Конец создания сообщения.
-		} else { // Если это обычный раунд.
+		} else { // Если это обычный раунд (старый формат triviadeath2-tjsp).
 			// Для обычного раунда используем один индекс.
 			answerIndex, ok := cmd.Payload["answerIndex"].(int) // Получаем индекс ответа.
 			if !ok {                                            // Если индекс не найден.
