@@ -1,12 +1,14 @@
 package commands // Пакет commands содержит реализацию CLI команд.
 
 import ( // Начинаем блок импортов.
-	"bufio"   // Читаем ввод пользователя из stdin.
-	"fmt"     // Форматируем сообщения и ошибки.
-	"log"     // Логируем события.
-	"os"      // Работаем с stdin для ввода пользователя.
-	"strconv" // Преобразуем строки в числа для индексов ответов.
-	"strings" // Работаем со строками для обработки ввода.
+	"bufio"     // Читаем ввод пользователя из stdin.
+	"fmt"       // Форматируем сообщения и ошибки.
+	"log"       // Логируем события.
+	"math/rand" // Генерируем случайные числа для автоматического процента.
+	"os"        // Работаем с stdin для ввода пользователя.
+	"strconv"   // Преобразуем строки в числа для индексов ответов.
+	"strings"   // Работаем со строками для обработки ввода.
+	"time"      // Используем таймауты для ввода пользователя.
 ) // Закрываем блок импортов.
 
 // handleEvent обрабатывает событие игры.
@@ -33,7 +35,21 @@ func handleEvent(event *GameEvent, manager *BotnetManager) error { // Функц
 		return handleQuiplash2Event(event, manager) // Обрабатываем событие Quiplash 2.
 	case event.GameTag == "everyday": // Если это игра "everyday".
 		return handleEverydayEvent(event, manager) // Обрабатываем событие Everyday.
+	case event.GameTag == "pollposition": // Если это игра "pollposition".
+		return handlePollPositionEvent(event, manager) // Обрабатываем событие Poll Position.
 	default: // Для других игр.
+		// Проверяем, не является ли это событие pollposition по структуре (если gameTag не установлен).
+		if event.Type == "object" && event.Payload != nil { // Если это событие типа "object".
+			if key, ok := event.Payload["key"].(string); ok && key == "bc:room" { // Если key = "bc:room".
+				if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
+					if state, ok := val["state"].(string); ok && state == "Gameplay_EnterPercentage" { // Если state = "Gameplay_EnterPercentage".
+						// Это событие pollposition, обрабатываем его.
+						log.Printf("coordinator: detected pollposition event by structure, gameTag was not set") // Логируем обнаружение по структуре.
+						return handlePollPositionEvent(event, manager)                                           // Обрабатываем событие Poll Position.
+					} // Конец проверки state.
+				} // Конец проверки val.
+			} // Конец проверки key.
+		} // Конец проверки структуры события.
 		log.Printf("coordinator: unknown game tag %s, using generic handler", event.GameTag) // Логируем неизвестный тег игры.
 		return handleGenericEvent(event, manager)                                            // Используем общий обработчик.
 	} // Конец switch.
@@ -677,6 +693,284 @@ func handleEverydayEvent(event *GameEvent, manager *BotnetManager) error { // Ф
 
 	return nil // Возвращаем nil (ошибки нет).
 } // Конец handleEverydayEvent.
+
+// PollPositionQuestionInfo содержит информацию о вопросе Poll Position.
+type PollPositionQuestionInfo struct { // Структура информации о вопросе.
+	Question string               // Текст вопроса.
+	Choices  []PollPositionChoice // Варианты ответов с их ID.
+} // Конец PollPositionQuestionInfo.
+
+// PollPositionChoice представляет вариант ответа в Poll Position.
+type PollPositionChoice struct { // Структура варианта ответа.
+	ID     int    // ID варианта ответа (0 для "Да", 1 для "Нет").
+	Choice string // Текст варианта ответа.
+} // Конец PollPositionChoice.
+
+// extractPollPositionQuestion извлекает информацию о вопросе из события Poll Position.
+// Принимает событие игры.
+// Возвращает информацию о вопросе или nil.
+func extractPollPositionQuestion(event *GameEvent) *PollPositionQuestionInfo { // Функция извлечения информации о вопросе.
+	if event == nil || event.Payload == nil { // Если событие или payload nil.
+		return nil // Возвращаем nil.
+	} // Конец проверки параметров.
+
+	// Проверяем формат: opcode "object" с result.key == "bc:room" и result.val.
+	if event.Type == "object" { // Если opcode = "object".
+		if key, ok := event.Payload["key"].(string); ok && key == "bc:room" { // Если key = "bc:room".
+			if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
+				if state, ok := val["state"].(string); ok && state == "Gameplay_EnterPercentage" { // Если state = "Gameplay_EnterPercentage".
+					// Извлекаем question (текст вопроса).
+					question := ""                             // Переменная для текста вопроса.
+					if q, ok := val["question"].(string); ok { // Если есть question.
+						question = q // Устанавливаем текст вопроса.
+					} // Конец проверки question.
+
+					// Извлекаем poll.choices (варианты ответов).
+					choices := []PollPositionChoice{}                         // Слайс для вариантов ответов.
+					if poll, ok := val["poll"].(map[string]interface{}); ok { // Если есть poll.
+						if choicesData, ok := poll["choices"].([]interface{}); ok { // Если есть choices.
+							for _, choiceItem := range choicesData { // Проходим по каждому варианту.
+								if choiceMap, ok := choiceItem.(map[string]interface{}); ok { // Если вариант - это map.
+									choiceID := -1                               // Переменная для ID варианта.
+									choiceText := ""                             // Переменная для текста варианта.
+									if id, ok := choiceMap["id"].(float64); ok { // Если есть id (JSON числа парсятся как float64).
+										choiceID = int(id) // Преобразуем в int.
+									} // Конец проверки id.
+									if text, ok := choiceMap["choice"].(string); ok { // Если есть choice.
+										choiceText = text // Устанавливаем текст варианта.
+									} // Конец проверки choice.
+									if choiceID >= 0 && choiceText != "" { // Если ID и текст найдены.
+										choices = append(choices, PollPositionChoice{ // Добавляем вариант ответа.
+											ID:     choiceID,   // Устанавливаем ID.
+											Choice: choiceText, // Устанавливаем текст.
+										}) // Конец создания варианта ответа.
+									} // Конец проверки наличия ID и текста.
+								} // Конец проверки choiceMap.
+							} // Конец цикла по вариантам.
+						} // Конец проверки choices.
+					} // Конец проверки poll.
+
+					if question != "" && len(choices) > 0 { // Если есть вопрос и варианты ответов.
+						return &PollPositionQuestionInfo{ // Возвращаем информацию о вопросе.
+							Question: question, // Устанавливаем текст вопроса.
+							Choices:  choices,  // Устанавливаем варианты ответов.
+						} // Конец создания информации о вопросе.
+					} // Конец проверки наличия вопроса и вариантов.
+				} // Конец проверки state.
+			} // Конец проверки val.
+		} // Конец проверки key.
+	} // Конец проверки opcode "object".
+
+	return nil // Возвращаем nil, если информация о вопросе не найдена.
+} // Конец extractPollPositionQuestion.
+
+// promptUserForPollPositionPercentage запрашивает процент у пользователя для Poll Position.
+// Если пользователь не ввёл процент за 5 секунд, используется случайный процент из списка: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100.
+// Принимает событие игры и информацию о вопросе.
+// Возвращает процент (0-100) или -1, если произошла ошибка.
+func promptUserForPollPositionPercentage(event *GameEvent, questionInfo *PollPositionQuestionInfo) (int, error) { // Функция запроса процента у пользователя.
+	if event == nil || questionInfo == nil { // Если событие или информация о вопросе nil.
+		return -1, fmt.Errorf("event or questionInfo is nil") // Возвращаем ошибку.
+	} // Конец проверки параметров.
+
+	// Выводим информацию о вопросе.
+	fmt.Printf("\n=== Poll Position - Percentage Required ===\n") // Выводим заголовок.
+	fmt.Printf("Question: %s\n", questionInfo.Question)           // Выводим текст вопроса.
+	fmt.Printf("Choices:\n")                                      // Выводим заголовок вариантов.
+
+	for _, choice := range questionInfo.Choices { // Проходим по каждому варианту.
+		fmt.Printf("  %d. %s\n", choice.ID, choice.Choice) // Выводим ID и текст варианта.
+	} // Конец цикла.
+
+	fmt.Printf("Enter percentage (0-100) for first choice (timeout 5s, random if not entered): ") // Выводим подсказку для ввода.
+
+	// Создаём канал для результата ввода.
+	inputChan := make(chan string, 1) // Создаём буферизованный канал для ввода.
+	errChan := make(chan error, 1)    // Создаём канал для ошибок.
+
+	// Запускаем горутину для чтения ввода.
+	go func() { // Запускаем горутину.
+		scanner := bufio.NewScanner(os.Stdin) // Создаём сканер для чтения из stdin.
+		if scanner.Scan() {                   // Если чтение удалось.
+			input := strings.TrimSpace(scanner.Text()) // Получаем введённый текст и убираем пробелы.
+			if err := scanner.Err(); err != nil {      // Если произошла ошибка сканера.
+				errChan <- fmt.Errorf("scanner error: %w", err) // Отправляем ошибку в канал.
+				return                                          // Выходим из горутины.
+			} // Конец проверки ошибки сканера.
+			inputChan <- input // Отправляем ввод в канал.
+		} else { // Если чтение не удалось.
+			errChan <- fmt.Errorf("failed to read user input") // Отправляем ошибку в канал.
+		} // Конец проверки чтения.
+	}() // Запускаем горутину.
+
+	// Ждём ввода с таймаутом 5 секунд.
+	select { // Выбираем между таймаутом и вводом.
+	case <-time.After(5 * time.Second): // Если прошло 5 секунд.
+		// Используем случайный процент из списка: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100.
+		randomPercentages := []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100} // Список случайных процентов.
+		randomIndex := rand.Intn(len(randomPercentages))                    // Генерируем случайный индекс.
+		percentage := randomPercentages[randomIndex]                        // Получаем случайный процент.
+		fmt.Printf("\nTimeout: using random percentage %d%%\n", percentage) // Выводим сообщение о таймауте.
+		return percentage, nil                                              // Возвращаем случайный процент и nil (ошибки нет).
+	case input := <-inputChan: // Если получен ввод.
+		if input == "" { // Если пользователь не ввёл ничего.
+			// Используем случайный процент из списка.
+			randomPercentages := []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100} // Список случайных процентов.
+			randomIndex := rand.Intn(len(randomPercentages))                    // Генерируем случайный индекс.
+			percentage := randomPercentages[randomIndex]                        // Получаем случайный процент.
+			fmt.Printf("No input: using random percentage %d%%\n", percentage)  // Выводим сообщение.
+			return percentage, nil                                              // Возвращаем случайный процент и nil (ошибки нет).
+		} // Конец проверки пустого ввода.
+
+		// Преобразуем ввод в число.
+		percentage, err := strconv.Atoi(input) // Преобразуем строку в число.
+		if err != nil {                        // Если преобразование не удалось.
+			return -1, fmt.Errorf("invalid percentage: %s", input) // Возвращаем ошибку.
+		} // Конец проверки преобразования.
+
+		// Проверяем, что процент в допустимом диапазоне.
+		if percentage < 0 || percentage > 100 { // Если процент вне диапазона.
+			return -1, fmt.Errorf("percentage out of range: %d (must be 0-100)", percentage) // Возвращаем ошибку.
+		} // Конец проверки диапазона.
+
+		return percentage, nil // Возвращаем процент и nil (ошибки нет).
+	case err := <-errChan: // Если произошла ошибка.
+		return -1, err // Возвращаем ошибку.
+	} // Конец select.
+} // Конец promptUserForPollPositionPercentage.
+
+// handlePollPositionEvent обрабатывает события игры Poll Position.
+// Принимает событие игры и менеджер ботнета.
+// Возвращает ошибку, если обработка не удалась.
+func handlePollPositionEvent(event *GameEvent, manager *BotnetManager) error { // Функция обработки событий Poll Position.
+	if event == nil || manager == nil { // Если событие или менеджер nil.
+		return fmt.Errorf("event or manager is nil") // Возвращаем ошибку.
+	} // Конец проверки параметров.
+
+	log.Printf("coordinator: handling Poll Position event type=%s, eventID=%s", event.Type, event.EventID) // Логируем обработку события Poll Position.
+
+	// Извлекаем информацию о вопросе.
+	questionInfo := extractPollPositionQuestion(event) // Извлекаем информацию о вопросе.
+	if questionInfo == nil {                           // Если информация о вопросе не найдена.
+		log.Printf("coordinator: no question found in Poll Position event") // Логируем отсутствие вопроса.
+		return nil                                                          // Возвращаем nil (ошибки нет, просто нет вопроса для ответа).
+	} // Конец проверки информации о вопросе.
+
+	log.Printf("coordinator: Poll Position question: %s, choices: %d", questionInfo.Question, len(questionInfo.Choices)) // Логируем информацию о вопросе.
+
+	// Запрашиваем процент у пользователя.
+	percentage, err := promptUserForPollPositionPercentage(event, questionInfo) // Запрашиваем процент у пользователя.
+	if err != nil {                                                             // Если запрос процента не удался.
+		return fmt.Errorf("failed to get user percentage: %w", err) // Возвращаем ошибку.
+	} // Конец проверки запроса процента.
+
+	if percentage < 0 { // Если пользователь не ввёл процент.
+		log.Printf("coordinator: user did not provide percentage, skipping") // Логируем пропуск процента.
+		return nil                                                           // Возвращаем nil (ошибки нет).
+	} // Конец проверки процента.
+
+	log.Printf("coordinator: user provided percentage: %d%%", percentage) // Логируем процент пользователя.
+
+	// Отправляем ответы всем клиентам с распределением согласно проценту.
+	return sendPollPositionAnswersToClients(event, percentage, questionInfo, manager) // Отправляем ответы всем клиентам.
+} // Конец handlePollPositionEvent.
+
+// sendPollPositionAnswersToClients отправляет ответы Poll Position всем клиентам с распределением согласно проценту.
+// Принимает событие игры, процент, информацию о вопросе и менеджер ботнета.
+// Возвращает ошибку, если отправка не удалась.
+func sendPollPositionAnswersToClients(event *GameEvent, percentage int, questionInfo *PollPositionQuestionInfo, manager *BotnetManager) error { // Функция отправки ответов всем клиентам.
+	if event == nil || manager == nil { // Если событие или менеджер nil.
+		return fmt.Errorf("event or manager is nil") // Возвращаем ошибку.
+	} // Конец проверки параметров.
+
+	if questionInfo == nil || len(questionInfo.Choices) < 2 { // Если вариантов ответов меньше 2.
+		return fmt.Errorf("invalid question info: need at least 2 choices") // Возвращаем ошибку.
+	} // Конец проверки вариантов ответов.
+
+	// Получаем количество подключенных клиентов.
+	manager.mu.RLock()                  // Блокируем мьютекс для чтения.
+	clientCount := len(manager.clients) // Получаем количество подключенных клиентов.
+	manager.mu.RUnlock()                // Разблокируем мьютекс.
+
+	if clientCount == 0 { // Если клиентов ещё нет.
+		log.Printf("coordinator: no clients connected yet, skipping Poll Position answer") // Логируем пропуск ответа.
+		return nil                                                                         // Возвращаем nil (ошибки нет, просто клиентов нет).
+	} // Конец проверки количества клиентов.
+
+	// Вычисляем количество ботов для каждого варианта ответа.
+	// Пользователь вводит процент для первого варианта (vote="0").
+	// Первый вариант (vote="0") получает percentage% ботов.
+	// Второй вариант (vote="1") получает остальные боты.
+	// Используем округление вверх для первого варианта, чтобы процент был точнее.
+	firstChoiceCount := (clientCount*percentage + 99) / 100 // Количество ботов для первого варианта (округляем вверх).
+	if firstChoiceCount > clientCount {                     // Если округление дало больше клиентов.
+		firstChoiceCount = clientCount // Ограничиваем количеством клиентов.
+	} // Конец проверки ограничения.
+	secondChoiceCount := clientCount - firstChoiceCount // Количество ботов для второго варианта (остаток).
+
+	log.Printf("coordinator: distributing Poll Position votes: %d bots vote for choice 0 (%.1f%%), %d bots vote for choice 1 (%.1f%%)", firstChoiceCount, float64(firstChoiceCount*100)/float64(clientCount), secondChoiceCount, float64(secondChoiceCount*100)/float64(clientCount)) // Логируем распределение голосов.
+
+	// Отправляем команды клиентам.
+	// Первые firstChoiceCount клиентов получают vote="0" (первый вариант) - percentage% ботов.
+	// Остальные secondChoiceCount клиентов получают vote="1" (второй вариант) - остальные боты.
+	clientIndex := 0 // Индекс текущего клиента.
+
+	// Отправляем команды для первого варианта - МЕНЯЕМ МЕСТАМИ: firstChoiceCount ботов отправляют vote="1".
+	for i := 0; i < firstChoiceCount; i++ { // Проходим по количеству ботов для первого варианта.
+		cmd := ClientCommand{ // Создаём команду.
+			Type:    "answer",                     // Устанавливаем тип команды.
+			EventID: event.EventID,                // Устанавливаем ID события.
+			Answer:  "1",                          // МЕНЯЕМ: отправляем "1" вместо "0".
+			Payload: make(map[string]interface{}), // Инициализируем payload.
+		} // Конец создания команды.
+
+		// Добавляем дополнительную информацию в payload.
+		cmd.Payload["gameTag"] = event.GameTag                   // Добавляем тег игры.
+		cmd.Payload["eventType"] = event.Type                    // Добавляем тип события.
+		cmd.Payload["vote"] = "1"                                // МЕНЯЕМ: отправляем "1" вместо "0".
+		cmd.Payload["opcode"] = "audience/count-group/increment" // Добавляем opcode.
+		cmd.Payload["name"] = "Poll Position Vote"               // Добавляем name группы подсчёта.
+
+		// Отправляем команду в канал.
+		select { // Выбираем между контекстом и отправкой команды.
+		case <-manager.ctx.Done(): // Если контекст отменён.
+			return fmt.Errorf("context canceled") // Возвращаем ошибку.
+		case manager.commandChan <- cmd: // Если команда отправлена в канал.
+			// Команда успешно отправлена.
+			clientIndex++ // Увеличиваем индекс клиента.
+		} // Конец select.
+	} // Конец цикла отправки для первого варианта.
+
+	// Отправляем команды для второго варианта - МЕНЯЕМ МЕСТАМИ: secondChoiceCount ботов отправляют vote="0".
+	for i := 0; i < secondChoiceCount; i++ { // Проходим по количеству ботов для второго варианта.
+		cmd := ClientCommand{ // Создаём команду.
+			Type:    "answer",                     // Устанавливаем тип команды.
+			EventID: event.EventID,                // Устанавливаем ID события.
+			Answer:  "0",                          // МЕНЯЕМ: отправляем "0" вместо "1".
+			Payload: make(map[string]interface{}), // Инициализируем payload.
+		} // Конец создания команды.
+
+		// Добавляем дополнительную информацию в payload.
+		cmd.Payload["gameTag"] = event.GameTag                   // Добавляем тег игры.
+		cmd.Payload["eventType"] = event.Type                    // Добавляем тип события.
+		cmd.Payload["vote"] = "0"                                // МЕНЯЕМ: отправляем "0" вместо "1".
+		cmd.Payload["opcode"] = "audience/count-group/increment" // Добавляем opcode.
+		cmd.Payload["name"] = "Poll Position Vote"               // Добавляем name группы подсчёта.
+
+		// Отправляем команду в канал.
+		select { // Выбираем между контекстом и отправкой команды.
+		case <-manager.ctx.Done(): // Если контекст отменён.
+			return fmt.Errorf("context canceled") // Возвращаем ошибку.
+		case manager.commandChan <- cmd: // Если команда отправлена в канал.
+			// Команда успешно отправлена.
+			clientIndex++ // Увеличиваем индекс клиента.
+		} // Конец select.
+	} // Конец цикла отправки для второго варианта.
+
+	log.Printf("coordinator: Poll Position answers sent to all %d clients", clientCount) // Логируем успешную отправку.
+
+	return nil // Возвращаем nil (ошибки нет).
+} // Конец sendPollPositionAnswersToClients.
 
 // handleQuiplash2Event обрабатывает события игры Quiplash 2.
 // Принимает событие игры и менеджер ботнета.

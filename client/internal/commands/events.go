@@ -262,6 +262,28 @@ func shouldRequireAnswer(event *GameEvent) bool { // Функция опреде
 		} // Конец проверки типа события.
 	} // Конец проверки everyday.
 
+	// Для игры "pollposition" проверяем opcode "object" с key "bc:room" и state "Gameplay_EnterPercentage".
+	if event.GameTag == "pollposition" || event.Type == "object" { // Если это pollposition или событие типа "object".
+		if event.Payload != nil { // Если payload не nil.
+			if event.Type == "object" { // Если opcode = "object".
+				if key, ok := event.Payload["key"].(string); ok && key == "bc:room" { // Если key = "bc:room".
+					if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
+						if state, ok := val["state"].(string); ok && state == "Gameplay_EnterPercentage" { // Если state = "Gameplay_EnterPercentage".
+							// Проверяем, есть ли question и poll с choices.
+							if question, ok := val["question"].(string); ok && question != "" { // Если есть question.
+								if poll, ok := val["poll"].(map[string]interface{}); ok { // Если есть poll.
+									if choices, ok := poll["choices"].([]interface{}); ok && len(choices) > 0 { // Если есть choices.
+										return true // Требует ответа.
+									} // Конец проверки choices.
+								} // Конец проверки poll.
+							} // Конец проверки question.
+						} // Конец проверки state.
+					} // Конец проверки val.
+				} // Конец проверки key.
+			} // Конец проверки opcode "object".
+		} // Конец проверки payload.
+	} // Конец проверки pollposition.
+
 	// Проверяем тип события (для других игр).
 	// Для Quiplash 2 события выбора ответа обычно имеют тип "answer_choice" или "question".
 	switch event.Type { // Проверяем тип события.

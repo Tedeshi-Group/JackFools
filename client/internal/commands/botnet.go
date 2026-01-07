@@ -483,7 +483,38 @@ func sendClientResponse(conn *websocket.Conn, cmd ClientCommand) error { // Фу
 				}, // Конец параметров.
 			} // Конец создания сообщения.
 		} // Конец проверки финального раунда.
-	} else { // Если это не Trivia Death 2, используем общий формат.
+	} else if gameTag, ok := cmd.Payload["gameTag"].(string); ok && gameTag == "pollposition" { // Если это Poll Position.
+		// Получаем vote, opcode и name из payload.
+		vote, _ := cmd.Payload["vote"].(string)     // Получаем vote ("0" или "1").
+		opcode, _ := cmd.Payload["opcode"].(string) // Получаем opcode.
+		name, _ := cmd.Payload["name"].(string)     // Получаем name группы подсчёта.
+
+		// Если vote не найден в payload, используем Answer.
+		if vote == "" { // Если vote не найден.
+			vote = cmd.Answer // Используем Answer как vote.
+		} // Конец проверки vote.
+
+		// Если opcode не найден, используем значение по умолчанию.
+		if opcode == "" { // Если opcode не найден.
+			opcode = "audience/count-group/increment" // Устанавливаем opcode по умолчанию.
+		} // Конец проверки opcode.
+
+		// Если name не найден, используем значение по умолчанию.
+		if name == "" { // Если name не найден.
+			name = "Poll Position Vote" // Устанавливаем name по умолчанию.
+		} // Конец проверки name.
+
+		// Формируем сообщение в формате Poll Position.
+		message = map[string]interface{}{ // Создаём карту для сообщения.
+			"seq":    1,      // Порядковый номер сообщения (начинаем с 1).
+			"opcode": opcode, // Код операции для Poll Position.
+			"params": map[string]interface{}{ // Параметры сообщения.
+				"name":  name, // Имя группы подсчёта.
+				"vote":  vote, // Vote ("0" или "1").
+				"times": 1,    // Количество раз (всегда 1).
+			}, // Конец параметров.
+		} // Конец создания сообщения.
+	} else { // Если это не Trivia Death 2 и не Poll Position, используем общий формат.
 		// Формируем JSON сообщение для отправки.
 		message = map[string]interface{}{ // Создаём карту для сообщения.
 			"type":    cmd.Type,    // Устанавливаем тип команды.
