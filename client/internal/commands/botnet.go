@@ -19,6 +19,8 @@ import ( // Начинаем блок импортов.
 
 	"github.com/google/uuid"       // Генерируем UUID для user-id.
 	"github.com/gorilla/websocket" // Работаем с WebSocket подключениями.
+
+	_ "jackfools/client/internal/games/generic" // Импортируем для init() регистрации generic handler.
 ) // Закрываем блок импортов.
 
 // BotnetManager управляет всеми подключениями ботнета.
@@ -370,6 +372,8 @@ func runCoordinator(conn *websocket.Conn, code string, manager *BotnetManager) {
 			return                                                   // Выходим из цикла.
 		} // Конец проверки ошибки.
 
+		log.Printf("[JF-COORD] raw message (len=%d): %s", len(message), string(message[:min(300, len(message))])) // Логируем сырое сообщение.
+
 		// Парсим и обрабатываем сообщение.
 		msg, err := parseWebSocketMessage(message) // Парсим сообщение.
 		if err != nil {                            // Если парсинг не удался.
@@ -671,14 +675,19 @@ func tryLearnFromMessage(raw []byte, manager *BotnetManager) { // Функция
 		return // Выходим.
 	} // Конец проверки ключа.
 
+	log.Printf("[JF-LEARN] received textDescriptions message, categories count: %d", len(msg.Result.Val.LatestDescriptions)) // Логируем получение.
+
 	// Получаем текущий вопрос.
 	manager.mu.RLock() // Блокируем мьютекс для чтения.
 	q := manager.currentQuestion // Получаем текущий вопрос.
 	manager.mu.RUnlock() // Разблокируем мьютекс.
 
 	if q == nil { // Если нет текущего вопроса.
+		log.Printf("[JF-LEARN] no current question set, skipping") // Логируем пропуск.
 		return // Выходим.
 	} // Конец проверки вопроса.
+
+	log.Printf("[JF-LEARN] current question: %s, processing answers...", q.Prompt[:min(60, len(q.Prompt))]) // Логируем текущий вопрос.
 
 	// Ищем правильный ответ в описания.
 	for _, desc := range msg.Result.Val.LatestDescriptions { // Проходим по описаниям.
