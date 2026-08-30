@@ -11,7 +11,6 @@
   let startedAt = null;
 
   // --- TD2 Bot State ---
-  let autoMode = true;
   let currentQuestion = null; // { prompt, choices, countGroupKey, type }
   let questionBankCount = 0;
 
@@ -132,24 +131,6 @@
     botLabel.textContent = "TD2 Audience Bot";
     botLabel.style.cssText = "font-weight:600;margin-bottom:6px;";
     root.appendChild(botLabel);
-
-    // Mode indicator
-    const modeIndicator = document.createElement("div");
-    modeIndicator.id = "jf-mode-indicator";
-    modeIndicator.textContent = "AUTO";
-    modeIndicator.style.cssText = "font-weight:700;font-size:14px;color:#6bffb3;margin-bottom:4px;";
-    root.appendChild(modeIndicator);
-
-    // Mode toggle button
-    const modeBtn = document.createElement("button");
-    modeBtn.id = "jf-mode-btn";
-    modeBtn.type = "button";
-    modeBtn.textContent = "Switch to Manual";
-    modeBtn.style.cssText =
-      "width:100%;padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.25);" +
-      "background:rgba(255,255,255,0.12);color:#fff;cursor:pointer;font-size:11px;margin-bottom:6px;";
-    modeBtn.addEventListener("click", toggleAutoMode);
-    root.appendChild(modeBtn);
 
     // Last question display
     const lastQ = document.createElement("div");
@@ -450,7 +431,7 @@
           type: ev.type,
         };
         updateQuestionDisplay();
-        if (autoMode) autoVote(ev);
+        autoVote(ev);
         break;
 
       case "voting_closed":
@@ -574,23 +555,7 @@
     });
   }
 
-  // --- UI additions (T6) ---
-  function updateModeDisplay() {
-    const el = document.getElementById("jf-mode-indicator");
-    if (!el) return;
-    if (autoMode) {
-      el.textContent = "AUTO";
-      el.style.color = "#6bffb3";
-    } else {
-      el.textContent = "MANUAL";
-      el.style.color = "#ffd93d";
-    }
-    const btn = document.getElementById("jf-mode-btn");
-    if (btn) {
-      btn.textContent = autoMode ? "Switch to Manual" : "Switch to Auto";
-    }
-  }
-
+  // --- UI additions ---
   function updateQuestionDisplay() {
     const el = document.getElementById("jf-last-question");
     if (!el) return;
@@ -623,21 +588,6 @@
     }, 3000);
   }
 
-  function toggleAutoMode() {
-    autoMode = !autoMode;
-    updateModeDisplay();
-    setBotStatus(autoMode ? "auto mode ON" : "manual mode ON");
-  }
-
-  // Keyboard shortcut: Ctrl+Shift+J
-  document.addEventListener("keydown", function (e) {
-    if (e.ctrlKey && e.shiftKey && e.code === "KeyJ") {
-      e.preventDefault();
-      toggleAutoMode();
-    }
-  });
-
   createOverlay();
   loadQuestionBank();
-  updateModeDisplay();
 })();
