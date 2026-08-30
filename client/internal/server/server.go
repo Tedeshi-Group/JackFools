@@ -3,9 +3,12 @@ package server // Пакет server содержит реализацию лок
 import ( // Начинаем блок импортов.
 	"encoding/json" // Кодируем ответы в JSON.
 	"errors"        // Работаем с ошибками.
+	"fmt"           // Форматируем пути файлов.
 	"io"            // Читаем тело запроса.
 	"log"           // Логируем события.
 	"net/http"      // Реализуем HTTP сервер и обработчики.
+	"os"            // Создаём директории и файлы.
+	"regexp"        // Санитизируем имя действия.
 	"strings"       // Нормализуем/сравниваем токен.
 	"time"          // Таймауты сервера.
 
@@ -84,6 +87,80 @@ func Run(cfg Config) error { // Запускает сервер и блокир�
 		}) // Конец ответа.
 	}) // Конец обработчика event.
 
+	mux.HandleFunc("POST /v1/recording", func(w http.ResponseWriter, r *http.Request) { // Приём записей от расширения.
+		if !checkToken(r, cfg.Token) { // Проверяем токен.
+			writeJSON(w, http.StatusUnauthorized, map[string]any{ // Отвечаем 401.
+				"ok":    false,               // Указываем провал.
+				"error": "unauthorized token", // Сообщение.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец проверки токена.
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // Читаем тело, ограничивая размер (10 MiB).
+		if err != nil {                                         // Если чтение не удалось.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ // Отвечаем 400.
+				"ok":    false,             // Признак ошибки.
+				"error": "read body failed", // Сообщение.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец обработки ошибки чтения.
+
+		var rec protocol.Recording // Создаём структуру записи.
+		if err := json.Unmarshal(body, &rec); err != nil { // Парсим JSON.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ // Отвечаем 400.
+				"ok":    false,          // Признак ошибки.
+				"error": "invalid json", // Сообщение.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец обработки ошибки JSON.
+
+		if err := rec.Validate(); err != nil { // Валидируем запись.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ // Отвечаем 400.
+				"ok":     false,             // Признак ошибки.
+				"error":  "invalid recording", // Сообщение.
+				"detail": err.Error(),        // Детализация.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец валидации.
+
+		dir := "recordings" // Директория для сохранения.
+		if err := os.MkdirAll(dir, 0o755); err != nil { // Создаём директорию если не существует.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{ // Отвечаем 500.
+				"ok":    false,                  // Признак ошибки.
+				"error": "failed to create dir", // Сообщение.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец создания директории.
+
+		safeName := sanitizeActionName(rec.ActionName) // Санитизируем имя действия.
+		filename := fmt.Sprintf("%d-%s.json", rec.StartedAt, safeName) // Формируем имя файла.
+		filepath := fmt.Sprintf("%s/%s", dir, filename)                // Полный путь.
+
+		data, err := json.MarshalIndent(rec, "", "  ") // Форматируем JSON с отступами.
+		if err != nil {                                 // Если форматирование не удалось.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{ // Отвечаем 500.
+				"ok":    false,                    // Признак ошибки.
+				"error": "failed to marshal json", // Сообщение.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец форматирования.
+
+		if err := os.WriteFile(filepath, data, 0o644); err != nil { // Записываем файл.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{ // Отвечаем 500.
+				"ok":    false,                    // Признак ошибки.
+				"error": "failed to write file",   // Сообщение.
+			}) // Конец ответа.
+			return // Выходим.
+		} // Конец записи файла.
+
+		log.Printf("recording saved: action=%s messages=%d path=%s", rec.ActionName, len(rec.Messages), filepath) // Логируем.
+
+		writeJSON(w, http.StatusOK, map[string]any{ // Возвращаем OK.
+			"ok":   true,        // Признак успеха.
+			"path": filepath,    // Путь к сохранённому файлу.
+		}) // Конец ответа.
+	}) // Конец обработчика recording.
+
 	srv := &http.Server{ // Создаём HTTP сервер.
 		Addr:         cfg.Addr,         // Адрес прослушивания.
 		Handler:      mux,              // Роутер.
@@ -107,6 +184,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) { // Утилита з�
 	enc := json.NewEncoder(w)                                         // Создаём энкодер.
 	_ = enc.Encode(v)                                                 // Пишем JSON (ошибку игнорируем для простоты).
 } // Конец writeJSON.
+
+var safeNameRe = regexp.MustCompile(`[^a-zA-Z0-9_\-]`) // Регулярка для санитизации имён.
+
+func sanitizeActionName(name string) string { // Санитизирует имя действия для использования в имени файла.
+	s := safeNameRe.ReplaceAllString(strings.TrimSpace(name), "_") // Заменяем небезопасные символы на подчёркивания.
+	if len(s) > 64 {                                                // Если длиннее 64 символов.
+		s = s[:64] // Обрезаем.
+	} // Конец проверки длины.
+	if s == "" { // Если после санитизации пустая строка.
+		s = "unnamed" // Используем имя по умолчанию.
+	} // Конец проверки пустоты.
+	return s // Возвращаем результат.
+} // Конец sanitizeActionName.
 
 
 

@@ -10,36 +10,59 @@ async function getSettings() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== "JF_EVENT") {
-    return;
-  }
+  if (!msg) return;
 
-  (async () => {
-    const { port, token } = await getSettings();
-    if (!token) {
-      sendResponse({ ok: false, error: "token_not_set" });
-      return;
-    }
+  if (msg.type === "JF_EVENT") {
+    (async () => {
+      const { port, token } = await getSettings();
+      if (!token) {
+        sendResponse({ ok: false, error: "token_not_set" });
+        return;
+      }
 
-    const url = `http://127.0.0.1:${port}/v1/event`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-JF-Token": token
-      },
-      body: JSON.stringify(msg.event)
+      const url = `http://127.0.0.1:${port}/v1/event`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-JF-Token": token
+        },
+        body: JSON.stringify(msg.event)
+      });
+
+      const data = await res.json().catch(() => null);
+      sendResponse({ ok: res.ok, status: res.status, data });
+    })().catch((e) => {
+      sendResponse({ ok: false, error: String(e) });
     });
 
-    const data = await res.json().catch(() => null);
-    sendResponse({ ok: res.ok, status: res.status, data });
-  })().catch((e) => {
-    sendResponse({ ok: false, error: String(e) });
-  });
+    return true;
+  }
 
-  return true;
+  if (msg.type === "JF_RECORDING") {
+    (async () => {
+      const { port, token } = await getSettings();
+      if (!token) {
+        sendResponse({ ok: false, error: "token_not_set" });
+        return;
+      }
+
+      const url = `http://127.0.0.1:${port}/v1/recording`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-JF-Token": token
+        },
+        body: JSON.stringify(msg.recording)
+      });
+
+      const data = await res.json().catch(() => null);
+      sendResponse({ ok: res.ok, status: res.status, data });
+    })().catch((e) => {
+      sendResponse({ ok: false, error: String(e) });
+    });
+
+    return true;
+  }
 });
-
-
-
-

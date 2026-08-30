@@ -1,0 +1,19 @@
+{
+  "action_name": "test_vote",
+  "note": "testing endpoint",
+  "page_url": "https://jackbox.tv/room/ABC123",
+  "started_at": 1725000000000,
+  "stopped_at": 1725000010000,
+  "messages": [
+    {
+      "dir": "send",
+      "ts": 1725000001000,
+      "data": "{\"type\":\"vote\",\"choice\":1}"
+    },
+    {
+      "dir": "recv",
+      "ts": 1725000002000,
+      "data": "{\"type\":\"vote-ok\"}"
+    }
+  ]
+}
