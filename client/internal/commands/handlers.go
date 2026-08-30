@@ -94,6 +94,14 @@ func handleTriviaDeath2Event(event *GameEvent, manager *BotnetManager) error { /
 
 	log.Printf("coordinator: Trivia Death 2 question: %s, choices: %d, roundType: %s", questionInfo.Prompt, len(questionInfo.Choices), questionInfo.RoundType) // Логируем информацию о вопросе.
 
+	// Сохраняем текущий вопрос для обучения.
+	manager.mu.Lock() // Блокируем мьютекс.
+	manager.currentQuestion = &CurrentQuestion{ // Сохраняем контекст вопроса.
+		Prompt:  questionInfo.Prompt,  // Текст вопроса.
+		Choices: questionInfo.Choices, // Варианты ответов.
+	} // Конец сохранения.
+	manager.mu.Unlock() // Разблокируем мьютекс.
+
 	// Выбираем нужную базу данных в зависимости от версии игры.
 	var answerDB *AnswerDatabase              // Переменная для базы обычных вопросов.
 	var finalRoundDB *AnswerDatabase          // Переменная для базы финального раунда.

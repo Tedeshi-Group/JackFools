@@ -36,7 +36,33 @@ type BotnetManager struct { // Структура менеджера ботне�
 	commandChan      chan ClientCommand      // Канал для отправки команд клиентам.
 	gameTag          string                  // Кешированный тег игры (извлекается из первого сообщения).
 	everydayTimes    int                     // Счётчик times для игры Everyday (начинается с 50, увеличивается).
+	currentQuestion  *CurrentQuestion        // Текущий вопрос для обучения.
 } // Конец BotnetManager.
+
+// CurrentQuestion хранит контекст текущего вопроса для обучения.
+type CurrentQuestion struct { // Контекст текущего вопроса.
+	Prompt  string   // Текст вопроса.
+	Choices []string // Варианты ответов.
+} // Конец CurrentQuestion.
+
+// QuestionAnswer — один правильный ответ на вопрос (для банка вопросов).
+type QuestionAnswer struct { // Ответ на вопрос.
+	Text  string `json:"text"`  // Текст ответа.
+	Index int    `json:"index"` // Информационный индекс.
+} // Конец QuestionAnswer.
+
+// QuestionEntry — один вопрос в банке.
+type QuestionEntry struct { // Запись вопроса.
+	Prompt    string           `json:"prompt"`     // Текст вопроса.
+	Answers   []QuestionAnswer `json:"answers"`    // Правильные ответы.
+	SeenCount int              `json:"seen_count"` // Сколько раз вопрос был замечен.
+	LastSeen  int64            `json:"last_seen"`  // Unix timestamp последнего появления (ms).
+} // Конец QuestionEntry.
+
+// QuestionBank — банк вопросов.
+type QuestionBank struct { // Банк вопросов.
+	Questions []QuestionEntry `json:"questions"` // Массив вопросов.
+} // Конец QuestionBank.
 
 // ClientCommand представляет команду, которую координатор отправляет клиентам.
 type ClientCommand struct { // Структура команды клиенту.
@@ -378,6 +404,11 @@ func runCoordinator(conn *websocket.Conn, code string, manager *BotnetManager) {
 			log.Printf("coordinator: failed to handle event: %v", err) // Логируем ошибку обработки.
 			// Продолжаем работу, даже если обработка не удалась.
 		} // Конец проверки обработки.
+
+		// Обучение: проверяем, не является ли сообщение ответом на вопрос.
+		if event.Type == "object" { // Если opcode = "object".
+			tryLearnFromMessage(message, manager) // Пытаемся извлечь правильный ответ.
+		} // Конец проверки обучения.
 	} // Конец бесконечного цикла.
 } // Конец runCoordinator.
 
@@ -615,3 +646,147 @@ func generateRandomAudienceName() string { // Функция генерации 
 
 	return string(result) // Возвращаем строку из 4 заглавных букв.
 } // Конец generateRandomAudienceName.
+
+// tryLearnFromMessage проверяет, содержит ли сообщение правильный ответ, и сохраняет его.
+// Принимает сырые байты WebSocket сообщения и менеджер ботнета.
+func tryLearnFromMessage(raw []byte, manager *BotnetManager) { // Функция обучения из сообщения.
+	// Парсим сообщение как JSON.
+	var msg struct { // Структура сообщения.
+		Result struct { // Результат.
+			Key string `json:"key"` // Ключ (должен быть "textDescriptions").
+			Val struct { // Значение.
+				LatestDescriptions []struct { // Описания.
+					Category string `json:"category"` // Категория.
+					Text     string `json:"text"`     // Текст.
+				} `json:"latestDescriptions"` // Массив описаний.
+			} `json:"val"` // Значение.
+		} `json:"result"` // Результат.
+	} // Конец структуры.
+
+	if err := json.Unmarshal(raw, &msg); err != nil { // Если не удалось распарсить.
+		return // Выходим (не наш формат).
+	} // Конец парсинга.
+
+	if msg.Result.Key != "textDescriptions" { // Если это не textDescriptions.
+		return // Выходим.
+	} // Конец проверки ключа.
+
+	// Получаем текущий вопрос.
+	manager.mu.RLock() // Блокируем мьютекс для чтения.
+	q := manager.currentQuestion // Получаем текущий вопрос.
+	manager.mu.RUnlock() // Разблокируем мьютекс.
+
+	if q == nil { // Если нет текущего вопроса.
+		return // Выходим.
+	} // Конец проверки вопроса.
+
+	// Ищем правильный ответ в описания.
+	for _, desc := range msg.Result.Val.LatestDescriptions { // Проходим по описаниям.
+		var answerTexts []string // Тексты правильных ответов.
+
+		if desc.Category == "TEXT_DESCRIPTION_CORRECT_ANSWER" { // Если одиночный ответ.
+			// "Верный ответ: X" → извлекаем X.
+			prefix := "Верный ответ: " // Префикс.
+			if idx := strings.Index(desc.Text, prefix); idx >= 0 { // Если префикс найден.
+				answerTexts = []string{desc.Text[idx+len(prefix):]} // Извлекаем ответ.
+			} // Конец извлечения.
+		} else if desc.Category == "TEXT_DESCRIPTION_CORRECT_ANSWERS" { // Если несколько ответов.
+			// "Верные ответы: X и Y" → извлекаем X, Y.
+			prefix := "Верные ответы: " // Префикс.
+			if idx := strings.Index(desc.Text, prefix); idx >= 0 { // Если префикс найден.
+				rest := desc.Text[idx+len(prefix):] // Остаток строки.
+				answerTexts = strings.Split(rest, " и ") // Разбиваем по " и ".
+			} // Конец извлечения.
+		} // Конец проверки категории.
+
+		if len(answerTexts) == 0 { // Если ответы не найдены.
+			continue // Продолжаем.
+		} // Конец проверки.
+
+		// Сопоставляем тексты ответов с индексами в choices.
+		answers := []QuestionAnswer{} // Ответы для сохранения.
+		for _, text := range answerTexts { // Проходим по текстам ответов.
+			text = strings.TrimSpace(text) // Убираем пробелы.
+			for i, choice := range q.Choices { // Проходим по вариантам.
+				if choice == text { // Если текст совпадает.
+					answers = append(answers, QuestionAnswer{Text: text, Index: i}) // Добавляем ответ.
+					break // Прерываем внутренний цикл.
+				} // Конец проверки совпадения.
+			} // Конец цикла по вариантам.
+		} // Конец цикла по текстам.
+
+		if len(answers) > 0 { // Если нашли ответы.
+			log.Printf("coordinator: learned %d answers for: %s", len(answers), q.Prompt[:min(60, len(q.Prompt))]) // Логируем обучение.
+			saveQuestionToFile(q.Prompt, answers) // Сохраняем в файл.
+		} // Конец проверки.
+	} // Конец цикла по описаниям.
+} // Конец tryLearnFromMessage.
+
+// saveQuestionToFile сохраняет вопрос с ответами в questions.json.
+// Принимает текст вопроса и слайс ответов.
+func saveQuestionToFile(prompt string, answers []QuestionAnswer) { // Функция сохранения вопроса в файл.
+	const questionsFile = "questions.json" // Путь к файлу банка вопросов.
+
+	// Загружаем существующий банк.
+	bank := QuestionBank{} // Банк вопросов.
+	data, readErr := os.ReadFile(questionsFile) // Читаем файл.
+	if readErr == nil { // Если файл существует.
+		_ = json.Unmarshal(data, &bank) // Игнорируем ошибку парсинга.
+	} // Конец загрузки.
+
+	// Ищем существующий вопрос по prompt.
+	now := time.Now().UnixMilli() // Текущее время.
+	found := false               // Флаг нахождения.
+	for i, q := range bank.Questions { // Проходим по вопросам.
+		if q.Prompt == prompt { // Если prompt совпадает.
+			bank.Questions[i].SeenCount++ // Увеличиваем счётчик.
+			bank.Questions[i].LastSeen = now // Обновляем время.
+			// Добавляем новые ответы.
+			for _, newAns := range answers { // Проходим по новым ответам.
+				exists := false // Флаг существования.
+				for _, existing := range bank.Questions[i].Answers { // Проверяем существующие.
+					if existing.Text == newAns.Text { // Если ответ уже есть.
+						exists = true // Устанавливаем флаг.
+						break         // Прерываем.
+					} // Конец проверки.
+				} // Конец цикла.
+				if !exists { // Если ответ новый.
+					bank.Questions[i].Answers = append(bank.Questions[i].Answers, newAns) // Добавляем.
+				} // Конец добавления.
+			} // Конец цикла по новым ответам.
+			found = true // Устанавливаем флаг.
+			break        // Прерываем.
+		} // Конец проверки prompt.
+	} // Конец цикла.
+
+	if !found { // Если вопрос новый.
+		bank.Questions = append(bank.Questions, QuestionEntry{ // Добавляем.
+			Prompt:    prompt,    // Текст вопроса.
+			Answers:   answers,   // Ответы.
+			SeenCount: 1,         // Первое появление.
+			LastSeen:  now,       // Текущее время.
+		}) // Конец добавления.
+	} // Конец проверки.
+
+	// Сохраняем банк.
+	data, err := json.MarshalIndent(bank, "", "  ") // Форматируем JSON.
+	if err != nil { // Если форматирование не удалось.
+		log.Printf("coordinator: failed to marshal questions: %v", err) // Логируем ошибку.
+		return // Выходим.
+	} // Конец форматирования.
+
+	if err := os.WriteFile(questionsFile, data, 0o644); err != nil { // Записываем файл.
+		log.Printf("coordinator: failed to write questions.json: %v", err) // Логируем ошибку.
+		return // Выходим.
+	} // Конец записи.
+
+	log.Printf("coordinator: saved question to %s (total: %d)", questionsFile, len(bank.Questions)) // Логируем сохранение.
+} // Конец saveQuestionToFile.
+
+// min возвращает минимальное из двух чисел.
+func min(a, b int) int { // Функция минимума.
+	if a < b { // Если a меньше b.
+		return a // Возвращаем a.
+	} // Конец проверки.
+	return b // Возвращаем b.
+} // Конец min.
