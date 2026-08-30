@@ -21,6 +21,7 @@ import ( // Начинаем блок импортов.
 	"github.com/gorilla/websocket" // Работаем с WebSocket подключениями.
 
 	_ "jackfools/client/internal/games/generic" // Импортируем для init() регистрации generic handler.
+	_ "jackfools/client/internal/games/fakinit" // Импортируем для init() регистрации Fakin' It handler.
 ) // Закрываем блок импортов.
 
 // BotnetManager управляет всеми подключениями ботнета.
