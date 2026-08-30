@@ -24,13 +24,16 @@
   // --- Listen for intercepted messages from page context ---
   window.addEventListener("message", function (event) {
     if (!event.data || event.data.type !== PREFIX) return;
-    if (!isRecording) return;
-    recordBuffer.push({
-      dir: event.data.dir,
-      ts: event.data.ts,
-      data: event.data.data,
-    });
-    updateMessageCount();
+
+    // Recording buffer (always active)
+    if (isRecording) {
+      recordBuffer.push({
+        dir: event.data.dir,
+        ts: event.data.ts,
+        data: event.data.data,
+      });
+      updateMessageCount();
+    }
   });
 
   // --- UI ---

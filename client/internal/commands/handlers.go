@@ -9,6 +9,8 @@ import ( // Начинаем блок импортов.
 	"strconv"   // Преобразуем строки в числа для индексов ответов.
 	"strings"   // Работаем со строками для обработки ввода.
 	"time"      // Используем таймауты для ввода пользователя.
+
+	"jackfools/client/internal/games" // Используем модульную систему игр.
 ) // Закрываем блок импортов.
 
 // handleEvent обрабатывает событие игры.
@@ -27,7 +29,17 @@ func handleEvent(event *GameEvent, manager *BotnetManager) error { // Функц
 		return nil // Возвращаем nil (ошибки нет).
 	} // Конец проверки необходимости ответа.
 
-	// Определяем, какая игра требует обработки.
+	// Сначала проверяем модульную систему (registry).
+	// Новые игры должны регистрироваться через games.Register().
+	gameEvent := convertToGamesEvent(event) // Конвертируем в тип games.
+	handler := games.GetHandler(event.GameTag) // Получаем обработчик из реестра.
+	if handler.Detect(gameEvent) { // Если обработчик может обработать событие.
+		log.Printf("coordinator: using modular handler for game %s", event.GameTag) // Логируем использование модульного обработчика.
+		return handler.Handle(gameEvent, &managerAdapter{manager: manager}) // Вызываем обработчик.
+	} // Конец проверки модульного обработчика.
+
+	// Fallback: используем старый switch для существующих игр.
+	// TODO: мигрировать существующие игры на модульную систему.
 	switch { // Проверяем тег игры.
 	case event.GameTag == "triviadeath2-tjsp" || strings.Contains(event.GameTag, "triviadeath2"): // Если это Trivia Death 2.
 		return handleTriviaDeath2Event(event, manager) // Обрабатываем событие Trivia Death 2.
@@ -54,6 +66,73 @@ func handleEvent(event *GameEvent, manager *BotnetManager) error { // Функц
 		return handleGenericEvent(event, manager)                                            // Используем общий обработчик.
 	} // Конец switch.
 } // Конец handleEvent.
+
+// convertToGamesEvent конвертирует commands.GameEvent в games.GameEvent.
+func convertToGamesEvent(event *GameEvent) *games.GameEvent { // Функция конвертации.
+	return &games.GameEvent{ // Возвращаем новый объект.
+		Type:           event.Type,           // Копируем тип.
+		EventID:        event.EventID,        // Копируем ID.
+		GameTag:        event.GameTag,        // Копируем тег игры.
+		Payload:        event.Payload,        // Копируем payload.
+		RequiresAnswer: event.RequiresAnswer, // Копируем флаг необходимости ответа.
+	} // Конец создания объекта.
+} // Конец convertToGamesEvent.
+
+// managerAdapter адаптирует BotnetManager к интерфейсу games.BotnetManagerAPI.
+type managerAdapter struct { // Структура адаптера.
+	manager *BotnetManager // Ссылка на менеджер.
+} // Конец managerAdapter.
+
+// SendCommand отправляет команду всем подключённым клиентам.
+func (a *managerAdapter) SendCommand(cmd games.ClientCommand) { // Функция отправки команды.
+	a.manager.commandChan <- ClientCommand{ // Отправляем команду в канал.
+		Type:    cmd.Type,    // Копируем тип.
+		EventID: cmd.EventID, // Копируем ID.
+		Answer:  cmd.Answer,  // Копируем ответ.
+		Payload: cmd.Payload, // Копируем payload.
+	} // Конец отправки.
+} // Конец SendCommand.
+
+// GetAnswerDB возвращает базу ответов для указанной игры.
+func (a *managerAdapter) GetAnswerDB(gameTag string) *games.AnswerDatabase { // Функция получения базы ответов.
+	// Для обратной совместимости возвращаем nil.
+	// Новые игры должны использовать свою собственную логику загрузки.
+	return nil // Возвращаем nil.
+} // Конец GetAnswerDB.
+
+// GetFinalRoundDB возвращает базу ответов финального раунда.
+func (a *managerAdapter) GetFinalRoundDB(gameTag string) *games.AnswerDatabase { // Функция получения базы финального раунда.
+	return nil // Возвращаем nil.
+} // Конец GetFinalRoundDB.
+
+// SetCurrentQuestion устанавливает текущий вопрос для обучения.
+func (a *managerAdapter) SetCurrentQuestion(prompt string, choices []string) { // Функция установки вопроса.
+	a.manager.mu.Lock() // Блокируем мьютекс.
+	a.manager.currentQuestion = &CurrentQuestion{ // Устанавливаем вопрос.
+		Prompt:  prompt,  // Текст вопроса.
+		Choices: choices, // Варианты ответов.
+	} // Конец установки.
+	a.manager.mu.Unlock() // Разблокируем мьютекс.
+} // Конец SetCurrentQuestion.
+
+// GetGameTag возвращает кешированный тег игры.
+func (a *managerAdapter) GetGameTag() string { // Функция получения тега игры.
+	a.manager.mu.RLock() // Блокируем мьютекс для чтения.
+	defer a.manager.mu.RUnlock() // Разблокируем мьютекс.
+	return a.manager.gameTag // Возвращаем тег.
+} // Конец GetGameTag.
+
+// SetGameTag устанавливает кешированный тег игры.
+func (a *managerAdapter) SetGameTag(tag string) { // Функция установки тега игры.
+	a.manager.mu.Lock() // Блокируем мьютекс.
+	a.manager.gameTag = tag // Устанавливаем тег.
+	a.manager.mu.Unlock() // Разблокируем мьютекс.
+} // Конец SetGameTag.
+
+// GetContext возвращает контекст для отмены.
+func (a *managerAdapter) GetContext() interface{} { // Функция получения контекста.
+	return a.manager.ctx // Возвращаем контекст.
+} // Конец GetContext.
 
 // handleTriviaDeath2Event обрабатывает события игры Trivia Death 2.
 // Принимает событие игры и менеджер ботнета.
@@ -93,6 +172,14 @@ func handleTriviaDeath2Event(event *GameEvent, manager *BotnetManager) error { /
 	} // Конец проверки информации о вопросе.
 
 	log.Printf("coordinator: Trivia Death 2 question: %s, choices: %d, roundType: %s", questionInfo.Prompt, len(questionInfo.Choices), questionInfo.RoundType) // Логируем информацию о вопросе.
+
+	// Сохраняем текущий вопрос для обучения.
+	manager.mu.Lock() // Блокируем мьютекс.
+	manager.currentQuestion = &CurrentQuestion{ // Сохраняем контекст вопроса.
+		Prompt:  questionInfo.Prompt,  // Текст вопроса.
+		Choices: questionInfo.Choices, // Варианты ответов.
+	} // Конец сохранения.
+	manager.mu.Unlock() // Разблокируем мьютекс.
 
 	// Выбираем нужную базу данных в зависимости от версии игры.
 	var answerDB *AnswerDatabase              // Переменная для базы обычных вопросов.
