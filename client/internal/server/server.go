@@ -212,6 +212,7 @@ func Run(cfg Config) error { // Запускает сервер и блокир�
 	}) // Конец обработчика GET /v1/questions.
 
 	mux.HandleFunc("POST /v1/questions", func(w http.ResponseWriter, r *http.Request) { // Добавляет/обновляет вопрос в банке.
+		log.Printf("POST /v1/questions received") // Логируем получение запроса.
 		if !checkToken(r, cfg.Token) { // Проверяем токен.
 			writeJSON(w, http.StatusUnauthorized, map[string]any{ "ok": false, "error": "unauthorized token" }) // 401.
 			return // Выходим.

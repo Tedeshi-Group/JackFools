@@ -99,7 +99,10 @@
 
   // Listen for vote requests from content.js
   window.addEventListener("__JF_VOTE__", function (event) {
-    if (!lastWs || lastWs.readyState !== OrigWebSocket.OPEN) return;
+    if (!lastWs || lastWs.readyState !== OrigWebSocket.OPEN) {
+      console.log("[JF-WS] vote dropped: no open WebSocket", lastWs ? "readyState=" + lastWs.readyState : "null");
+      return;
+    }
     var detail = event.detail;
     if (!detail || !detail.name) return;
     var payload = JSON.stringify({
@@ -111,6 +114,7 @@
         times: detail.times || 1,
       },
     });
+    console.log("[JF-WS] sending vote:", payload);
     lastWs.send(payload);
   });
 })();

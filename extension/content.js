@@ -41,6 +41,8 @@
 
     // TD2 bot processing (only incoming messages)
     if (event.data.dir === "recv" && window.__JF_TD2_PARSER__) {
+      var ev = window.__JF_TD2_PARSER__.classify(event.data.data);
+      if (ev) console.log("[JF-BOT] recv event:", ev.type || (Array.isArray(ev) ? ev.map(function(e){return e.type}) : "null"), event.data.data.substring(0, 200));
       handleTD2Message(event.data.data);
     }
   });
@@ -441,6 +443,7 @@
 
       case "correct_answer":
       case "correct_answers":
+        console.log("[JF-BOT] correct answer revealed:", ev.answerTexts, "for question:", currentQuestion ? currentQuestion.prompt.substring(0, 60) : "null");
         if (currentQuestion) {
           learnAnswer(currentQuestion, ev.answerTexts);
         }
@@ -490,6 +493,7 @@
   }
 
   function sendVote(vote) {
+    console.log("[JF-BOT] sending vote:", JSON.stringify(vote));
     window.dispatchEvent(new CustomEvent("__JF_VOTE__", { detail: vote }));
   }
 
@@ -504,14 +508,19 @@
         answers.push({ text: text, index: idx });
       }
     }
-    if (answers.length === 0) return;
+    if (answers.length === 0) {
+      console.log("[JF-BOT] learnAnswer: no matching answers found in choices");
+      return;
+    }
 
+    console.log("[JF-BOT] learnAnswer: storing", answers.length, "answers for:", question.prompt.substring(0, 60));
     // Send to server
     chrome.runtime.sendMessage({
       type: "JF_QUESTION_STORE",
       prompt: question.prompt,
       answers: answers,
     }, function (resp) {
+      console.log("[JF-BOT] JF_QUESTION_STORE response:", JSON.stringify(resp));
       if (resp && resp.ok) {
         // Update local cache
         upsertLocalBank(question.prompt, answers);

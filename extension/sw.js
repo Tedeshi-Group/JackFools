@@ -67,14 +67,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "JF_QUESTION_STORE") {
+    console.log("[JF-SW] JF_QUESTION_STORE:", msg.prompt.substring(0, 60), "answers:", msg.answers.length);
     (async () => {
       const { port, token } = await getSettings();
       if (!token) {
+        console.log("[JF-SW] JF_QUESTION_STORE: no token");
         sendResponse({ ok: false, error: "token_not_set" });
         return;
       }
 
       const url = `http://127.0.0.1:${port}/v1/questions`;
+      console.log("[JF-SW] JF_QUESTION_STORE: POST", url);
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -85,8 +88,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
 
       const data = await res.json().catch(() => null);
+      console.log("[JF-SW] JF_QUESTION_STORE: response", res.status, JSON.stringify(data));
       sendResponse({ ok: res.ok, status: res.status, data });
     })().catch((e) => {
+      console.log("[JF-SW] JF_QUESTION_STORE error:", String(e));
       sendResponse({ ok: false, error: String(e) });
     });
 
