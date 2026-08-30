@@ -10,6 +10,11 @@
   let recordBuffer = [];
   let startedAt = null;
 
+  // --- TD2 Bot State ---
+  let autoMode = true;
+  let currentQuestion = null; // { prompt, choices, countGroupKey, type }
+  let questionBankCount = 0;
+
   // --- Inject page-context WebSocket interceptor ---
   function injectInterceptor() {
     const s = document.createElement("script");
@@ -24,13 +29,21 @@
   // --- Listen for intercepted messages from page context ---
   window.addEventListener("message", function (event) {
     if (!event.data || event.data.type !== PREFIX) return;
-    if (!isRecording) return;
-    recordBuffer.push({
-      dir: event.data.dir,
-      ts: event.data.ts,
-      data: event.data.data,
-    });
-    updateMessageCount();
+
+    // Recording buffer (always active)
+    if (isRecording) {
+      recordBuffer.push({
+        dir: event.data.dir,
+        ts: event.data.ts,
+        data: event.data.data,
+      });
+      updateMessageCount();
+    }
+
+    // TD2 bot processing (only incoming messages)
+    if (event.data.dir === "recv" && window.__JF_TD2_PARSER__) {
+      handleTD2Message(event.data.data);
+    }
   });
 
   // --- UI ---
@@ -113,6 +126,55 @@
     const sep = document.createElement("div");
     sep.style.cssText = "border-top:1px solid rgba(255,255,255,0.15);margin:6px 0;";
     root.appendChild(sep);
+
+    // --- TD2 Bot section ---
+    const botLabel = document.createElement("div");
+    botLabel.textContent = "TD2 Audience Bot";
+    botLabel.style.cssText = "font-weight:600;margin-bottom:6px;";
+    root.appendChild(botLabel);
+
+    // Mode indicator
+    const modeIndicator = document.createElement("div");
+    modeIndicator.id = "jf-mode-indicator";
+    modeIndicator.textContent = "AUTO";
+    modeIndicator.style.cssText = "font-weight:700;font-size:14px;color:#6bffb3;margin-bottom:4px;";
+    root.appendChild(modeIndicator);
+
+    // Mode toggle button
+    const modeBtn = document.createElement("button");
+    modeBtn.id = "jf-mode-btn";
+    modeBtn.type = "button";
+    modeBtn.textContent = "Switch to Manual";
+    modeBtn.style.cssText =
+      "width:100%;padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.25);" +
+      "background:rgba(255,255,255,0.12);color:#fff;cursor:pointer;font-size:11px;margin-bottom:6px;";
+    modeBtn.addEventListener("click", toggleAutoMode);
+    root.appendChild(modeBtn);
+
+    // Last question display
+    const lastQ = document.createElement("div");
+    lastQ.id = "jf-last-question";
+    lastQ.textContent = "No active question";
+    lastQ.style.cssText = "font-size:10px;opacity:0.5;margin-bottom:4px;word-break:break-word;";
+    root.appendChild(lastQ);
+
+    // Bank count
+    const bankCount = document.createElement("div");
+    bankCount.id = "jf-bank-count";
+    bankCount.textContent = "Bank: 0 questions";
+    bankCount.style.cssText = "font-size:10px;opacity:0.7;margin-bottom:4px;";
+    root.appendChild(bankCount);
+
+    // Bot status
+    const botStatus = document.createElement("div");
+    botStatus.id = "jf-bot-status";
+    botStatus.style.cssText = "font-size:10px;opacity:0.8;color:#6bffb3;min-height:14px;";
+    root.appendChild(botStatus);
+
+    // Separator before recording
+    const sep2 = document.createElement("div");
+    sep2.style.cssText = "border-top:1px solid rgba(255,255,255,0.15);margin:6px 0;";
+    root.appendChild(sep2);
 
     // Recording label
     const recLabel = document.createElement("div");
@@ -361,5 +423,221 @@
     setStatus("event ok");
   }
 
+  // ===== TD2 Bot Logic =====
+
+  function handleTD2Message(raw) {
+    const parser = window.__JF_TD2_PARSER__;
+    const ev = parser.classify(raw);
+    if (!ev) return;
+
+    // Handle arrays (multiple textDescription events in one message)
+    if (Array.isArray(ev)) {
+      for (const e of ev) handleSingleTD2Event(e);
+      return;
+    }
+    handleSingleTD2Event(ev);
+  }
+
+  function handleSingleTD2Event(ev) {
+    switch (ev.type) {
+      case "regular_question":
+      case "final_round_question":
+      case "death_room_vote":
+        currentQuestion = {
+          prompt: ev.prompt,
+          choices: ev.choices,
+          countGroupKey: ev.countGroupKey,
+          type: ev.type,
+        };
+        updateQuestionDisplay();
+        if (autoMode) autoVote(ev);
+        break;
+
+      case "voting_closed":
+        currentQuestion = null;
+        updateQuestionDisplay();
+        break;
+
+      case "correct_answer":
+      case "correct_answers":
+        if (currentQuestion) {
+          learnAnswer(currentQuestion, ev.answerTexts);
+        }
+        break;
+    }
+  }
+
+  // --- Auto-vote (T4) ---
+  function autoVote(ev) {
+    const vote = { name: ev.countGroupKey || "TriviaDeath2AudienceChoice", times: 1 };
+
+    if (ev.type === "death_room_vote") {
+      // Death room: always random
+      vote.vote = String(Math.floor(Math.random() * ev.choices.length));
+    } else if (ev.type === "final_round_question") {
+      // Final round: only vote if we know the answer
+      const known = lookupAnswerSync(ev.prompt);
+      if (known && known.length > 0) {
+        vote.vote = known.join(",");
+      } else {
+        return; // Skip unknown final round questions
+      }
+    } else {
+      // Regular question: vote known or random
+      const known = lookupAnswerSync(ev.prompt);
+      if (known && known.length > 0) {
+        vote.vote = String(known[0]);
+      } else {
+        vote.vote = String(Math.floor(Math.random() * ev.choices.length));
+      }
+    }
+
+    sendVote(vote);
+    setBotStatus("voted: " + vote.vote);
+  }
+
+  function lookupAnswerSync(prompt) {
+    // Synchronous lookup requires the bank to be cached
+    if (!window.__JF_TD2_BANK__) return null;
+    const bank = window.__JF_TD2_BANK__;
+    for (const q of bank) {
+      if (q.prompt === prompt) {
+        return q.answers.map(function (a) { return a.index; });
+      }
+    }
+    return null;
+  }
+
+  function sendVote(vote) {
+    window.dispatchEvent(new CustomEvent("__JF_VOTE__", { detail: vote }));
+  }
+
+  // --- Teaching loop (T5) ---
+  function learnAnswer(question, answerTexts) {
+    if (!answerTexts || answerTexts.length === 0) return;
+
+    const answers = [];
+    for (const text of answerTexts) {
+      const idx = question.choices.indexOf(text);
+      if (idx !== -1) {
+        answers.push({ text: text, index: idx });
+      }
+    }
+    if (answers.length === 0) return;
+
+    // Send to server
+    chrome.runtime.sendMessage({
+      type: "JF_QUESTION_STORE",
+      prompt: question.prompt,
+      answers: answers,
+    }, function (resp) {
+      if (resp && resp.ok) {
+        // Update local cache
+        upsertLocalBank(question.prompt, answers);
+        setBotStatus("learned: " + question.prompt.substring(0, 40));
+        updateBankCount();
+      }
+    });
+  }
+
+  function upsertLocalBank(prompt, answers) {
+    if (!window.__JF_TD2_BANK__) window.__JF_TD2_BANK__ = [];
+    const bank = window.__JF_TD2_BANK__;
+    for (let i = 0; i < bank.length; i++) {
+      if (bank[i].prompt === prompt) {
+        // Merge answers
+        for (const a of answers) {
+          const exists = bank[i].answers.some(function (e) { return e.text === a.text; });
+          if (!exists) bank[i].answers.push(a);
+        }
+        bank[i].seen_count = (bank[i].seen_count || 0) + 1;
+        bank[i].last_seen = Date.now();
+        return;
+      }
+    }
+    bank.push({
+      prompt: prompt,
+      answers: answers,
+      seen_count: 1,
+      last_seen: Date.now(),
+    });
+  }
+
+  // --- Question bank loading ---
+  function loadQuestionBank() {
+    chrome.runtime.sendMessage({ type: "JF_QUESTIONS_LIST" }, function (resp) {
+      if (resp && resp.ok && resp.questions) {
+        window.__JF_TD2_BANK__ = resp.questions;
+        questionBankCount = resp.questions.length;
+        updateBankCount();
+      }
+    });
+  }
+
+  // --- UI additions (T6) ---
+  function updateModeDisplay() {
+    const el = document.getElementById("jf-mode-indicator");
+    if (!el) return;
+    if (autoMode) {
+      el.textContent = "AUTO";
+      el.style.color = "#6bffb3";
+    } else {
+      el.textContent = "MANUAL";
+      el.style.color = "#ffd93d";
+    }
+    const btn = document.getElementById("jf-mode-btn");
+    if (btn) {
+      btn.textContent = autoMode ? "Switch to Manual" : "Switch to Auto";
+    }
+  }
+
+  function updateQuestionDisplay() {
+    const el = document.getElementById("jf-last-question");
+    if (!el) return;
+    if (!currentQuestion) {
+      el.textContent = "No active question";
+      el.style.opacity = "0.5";
+      return;
+    }
+    const known = lookupAnswerSync(currentQuestion.prompt);
+    const icon = known ? "\u2705" : "\u2753";
+    const label = known ? "known" : "unknown";
+    el.textContent = icon + " " + currentQuestion.prompt.substring(0, 50) + " [" + label + "]";
+    el.style.opacity = "1";
+  }
+
+  function updateBankCount() {
+    const el = document.getElementById("jf-bank-count");
+    if (!el) return;
+    el.textContent = "Bank: " + questionBankCount + " questions";
+  }
+
+  function setBotStatus(text) {
+    const el = document.getElementById("jf-bot-status");
+    if (!el) return;
+    el.textContent = text;
+    el.style.opacity = "0.8";
+    clearTimeout(el._timer);
+    el._timer = setTimeout(function () {
+      el.textContent = "";
+    }, 3000);
+  }
+
+  function toggleAutoMode() {
+    autoMode = !autoMode;
+    updateModeDisplay();
+    setBotStatus(autoMode ? "auto mode ON" : "manual mode ON");
+  }
+
+  // Keyboard shortcut: Ctrl+Shift+J
+  document.addEventListener("keydown", function (e) {
+    if (e.ctrlKey && e.shiftKey && e.code === "KeyJ") {
+      e.preventDefault();
+      toggleAutoMode();
+    }
+  });
+
   createOverlay();
+  loadQuestionBank();
+  updateModeDisplay();
 })();

@@ -15,7 +15,7 @@
   "content_scripts": [
     {
       "matches": ["*://*.jackbox.tv/*", "*://jackbox.tv/*", "*://*.jackbox.fun/*", "*://jackbox.fun/*"],
-      "js": ["content.js"],
+      "js": ["td2-parser.js", "content.js"],
       "run_at": "document_end"
     }
   ],

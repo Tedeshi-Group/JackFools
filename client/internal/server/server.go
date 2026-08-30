@@ -15,6 +15,31 @@ import ( // Начинаем блок импортов.
 	"jackfools/client/internal/protocol" // Общие структуры протокола.
 ) // Закрываем блок импортов.
 
+// QuestionAnswer — один правильный ответ на вопрос.
+type QuestionAnswer struct { // Ответ на вопрос.
+	Text  string `json:"text"`  // Текст ответа (точное совпадение с вариантом в игре).
+	Index int    `json:"index"` // Информационный индекс (не используется для мэтчинга).
+} // Конец QuestionAnswer.
+
+// QuestionEntry — один вопрос в банке.
+type QuestionEntry struct { // Запись вопроса.
+	Prompt    string            `json:"prompt"`     // Текст вопроса (включая [i] теги).
+	Answers   []QuestionAnswer  `json:"answers"`    // Правильные ответы.
+	SeenCount int               `json:"seen_count"` // Сколько раз вопрос был замечен.
+	LastSeen  int64             `json:"last_seen"`  // Unix timestamp последнего появления (ms).
+} // Конец QuestionEntry.
+
+// QuestionBank — банк вопросов.
+type QuestionBank struct { // Банк вопросов.
+	Questions []QuestionEntry `json:"questions"` // Массив вопросов.
+} // Конец QuestionBank.
+
+// QuestionStoreRequest — тело запроса POST /v1/questions.
+type QuestionStoreRequest struct { // Запрос сохранения вопроса.
+	Prompt  string            `json:"prompt"`  // Текст вопроса.
+	Answers []QuestionAnswer  `json:"answers"` // Правильные ответы.
+} // Конец QuestionStoreRequest.
+
 type Config struct { // Конфигурация сервера.
 	Addr         string        // Адрес вида 127.0.0.1:27124.
 	Token        string        // Ожидаемый токен (значение X-JF-Token).
@@ -160,6 +185,151 @@ func Run(cfg Config) error { // Запускает сервер и блокир�
 			"path": filepath,    // Путь к сохранённому файлу.
 		}) // Конец ответа.
 	}) // Конец обработчика recording.
+
+	// --- Question Bank endpoints ---
+
+	const questionsFile = "questions.json" // Путь к файлу банка вопросов.
+
+	mux.HandleFunc("GET /v1/questions", func(w http.ResponseWriter, r *http.Request) { // Возвращает полный банк вопросов.
+		if !checkToken(r, cfg.Token) { // Проверяем токен.
+			writeJSON(w, http.StatusUnauthorized, map[string]any{ "ok": false, "error": "unauthorized token" }) // 401.
+			return // Выходим.
+		} // Конец проверки токена.
+
+		data, err := os.ReadFile(questionsFile) // Читаем файл банка вопросов.
+		if err != nil { // Если файл не существует или не читается.
+			writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "questions": []any{} }) // Возвращаем пустой банк.
+			return // Выходим.
+		} // Конец обработки ошибки.
+
+		var bank QuestionBank // Парсим банк вопросов.
+		if err := json.Unmarshal(data, &bank); err != nil { // Если JSON невалиден.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{ "ok": false, "error": "invalid questions.json" }) // 500.
+			return // Выходим.
+		} // Конец парсинга.
+
+		writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "questions": bank.Questions }) // Возвращаем банк.
+	}) // Конец обработчика GET /v1/questions.
+
+	mux.HandleFunc("POST /v1/questions", func(w http.ResponseWriter, r *http.Request) { // Добавляет/обновляет вопрос в банке.
+		if !checkToken(r, cfg.Token) { // Проверяем токен.
+			writeJSON(w, http.StatusUnauthorized, map[string]any{ "ok": false, "error": "unauthorized token" }) // 401.
+			return // Выходим.
+		} // Конец проверки токена.
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // Читаем тело, ограничивая 1 MiB.
+		if err != nil { // Если чтение не удалось.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ "ok": false, "error": "read body failed" }) // 400.
+			return // Выходим.
+		} // Конец обработки ошибки.
+
+		var req QuestionStoreRequest // Парсим запрос.
+		if err := json.Unmarshal(body, &req); err != nil { // Если JSON невалиден.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ "ok": false, "error": "invalid json" }) // 400.
+			return // Выходим.
+		} // Конец парсинга.
+
+		if strings.TrimSpace(req.Prompt) == "" { // Если prompt пустой.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ "ok": false, "error": "prompt is required" }) // 400.
+			return // Выходим.
+		} // Конец проверки prompt.
+
+		// Загружаем существующий банк.
+		var bank QuestionBank // Банк вопросов.
+		data, readErr := os.ReadFile(questionsFile) // Читаем файл.
+		if readErr == nil { // Если файл существует.
+			_ = json.Unmarshal(data, &bank) // Игнорируем ошибку парсинга (может быть пустой).
+		} // Конец загрузки.
+
+		// Ищем существующий вопрос по prompt.
+		now := time.Now().UnixMilli() // Текущее время.
+		found := false               // Флаг нахождения.
+		for i, q := range bank.Questions { // Проходим по вопросам.
+			if q.Prompt == req.Prompt { // Если prompt совпадает.
+				bank.Questions[i].SeenCount++ // Увеличиваем счётчик.
+				bank.Questions[i].LastSeen = now // Обновляем время.
+				// Добавляем новые ответы, которых ещё нет.
+				for _, newAns := range req.Answers { // Проходим по новым ответам.
+					exists := false // Флаг существования.
+					for _, existing := range bank.Questions[i].Answers { // Проверяем существующие.
+						if existing.Text == newAns.Text { // Если ответ уже есть.
+							exists = true // Устанавливаем флаг.
+							break         // Прерываем.
+						} // Конец проверки.
+					} // Конец цикла.
+					if !exists { // Если ответ новый.
+						bank.Questions[i].Answers = append(bank.Questions[i].Answers, newAns) // Добавляем.
+					} // Конец добавления.
+				} // Конец цикла по новым ответам.
+				found = true // Устанавливаем флаг.
+				break        // Прерываем.
+			} // Конец проверки prompt.
+		} // Конец цикла.
+
+		if !found { // Если вопрос новый.
+			bank.Questions = append(bank.Questions, QuestionEntry{ // Добавляем.
+				Prompt:    req.Prompt,    // Текст вопроса.
+				Answers:   req.Answers,   // Ответы.
+				SeenCount: 1,             // Первое появление.
+				LastSeen:  now,           // Текущее время.
+			}) // Конец добавления.
+		} // Конец проверки.
+
+		// Сохраняем банк.
+		data, err = json.MarshalIndent(bank, "", "  ") // Форматируем JSON.
+		if err != nil { // Если форматирование не удалось.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{ "ok": false, "error": "marshal failed" }) // 500.
+			return // Выходим.
+		} // Конец форматирования.
+
+		if err := os.WriteFile(questionsFile, data, 0o644); err != nil { // Записываем файл.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{ "ok": false, "error": "write failed" }) // 500.
+			return // Выходим.
+		} // Конец записи.
+
+		log.Printf("question stored: prompt=%s answers=%d seen=%d", req.Prompt, len(req.Answers), func() int { // Логируем.
+			for _, q := range bank.Questions { // Ищем вопрос.
+				if q.Prompt == req.Prompt { return q.SeenCount } // Возвращаем счётчик.
+			} // Конец поиска.
+			return 0 // Не найден (не должно произойти).
+		}()) // Конец логирования.
+
+		writeJSON(w, http.StatusOK, map[string]any{ "ok": true }) // Возвращаем OK.
+	}) // Конец обработчика POST /v1/questions.
+
+	mux.HandleFunc("GET /v1/questions/lookup", func(w http.ResponseWriter, r *http.Request) { // Ищет вопрос по prompt.
+		if !checkToken(r, cfg.Token) { // Проверяем токен.
+			writeJSON(w, http.StatusUnauthorized, map[string]any{ "ok": false, "error": "unauthorized token" }) // 401.
+			return // Выходим.
+		} // Конец проверки токена.
+
+		prompt := r.URL.Query().Get("prompt") // Получаем prompt из query string.
+		if strings.TrimSpace(prompt) == "" { // Если prompt пустой.
+			writeJSON(w, http.StatusBadRequest, map[string]any{ "ok": false, "error": "prompt parameter required" }) // 400.
+			return // Выходим.
+		} // Конец проверки prompt.
+
+		data, err := os.ReadFile(questionsFile) // Читаем файл.
+		if err != nil { // Если файл не существует.
+			writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "found": false }) // Возвращаем not found.
+			return // Выходим.
+		} // Конец чтения.
+
+		var bank QuestionBank // Парсим банк.
+		if err := json.Unmarshal(data, &bank); err != nil { // Если JSON невалиден.
+			writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "found": false }) // Возвращаем not found.
+			return // Выходим.
+		} // Конец парсинга.
+
+		for _, q := range bank.Questions { // Ищем вопрос.
+			if q.Prompt == prompt { // Если prompt совпадает.
+				writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "found": true, "answers": q.Answers }) // Возвращаем ответы.
+				return // Выходим.
+			} // Конец проверки.
+		} // Конец поиска.
+
+		writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "found": false }) // Вопрос не найден.
+	}) // Конец обработчика GET /v1/questions/lookup.
 
 	srv := &http.Server{ // Создаём HTTP сервер.
 		Addr:         cfg.Addr,         // Адрес прослушивания.

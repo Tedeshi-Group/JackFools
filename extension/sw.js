@@ -65,4 +65,85 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     return true;
   }
+
+  if (msg.type === "JF_QUESTION_STORE") {
+    (async () => {
+      const { port, token } = await getSettings();
+      if (!token) {
+        sendResponse({ ok: false, error: "token_not_set" });
+        return;
+      }
+
+      const url = `http://127.0.0.1:${port}/v1/questions`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-JF-Token": token
+        },
+        body: JSON.stringify({ prompt: msg.prompt, answers: msg.answers })
+      });
+
+      const data = await res.json().catch(() => null);
+      sendResponse({ ok: res.ok, status: res.status, data });
+    })().catch((e) => {
+      sendResponse({ ok: false, error: String(e) });
+    });
+
+    return true;
+  }
+
+  if (msg.type === "JF_QUESTIONS_LIST") {
+    (async () => {
+      const { port, token } = await getSettings();
+      if (!token) {
+        sendResponse({ ok: false, error: "token_not_set" });
+        return;
+      }
+
+      const url = `http://127.0.0.1:${port}/v1/questions`;
+      const res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "X-JF-Token": token
+        }
+      });
+
+      const data = await res.json().catch(() => null);
+      if (data && data.ok) {
+        sendResponse({ ok: true, questions: data.questions || [] });
+      } else {
+        sendResponse({ ok: false, error: data ? data.error : "request failed" });
+      }
+    })().catch((e) => {
+      sendResponse({ ok: false, error: String(e) });
+    });
+
+    return true;
+  }
+
+  if (msg.type === "JF_QUESTION_LOOKUP") {
+    (async () => {
+      const { port, token } = await getSettings();
+      if (!token) {
+        sendResponse({ ok: false, error: "token_not_set" });
+        return;
+      }
+
+      const url = `http://127.0.0.1:${port}/v1/questions/lookup?prompt=${encodeURIComponent(msg.prompt)}`;
+      const res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "X-JF-Token": token
+        }
+      });
+
+      const data = await res.json().catch(() => null);
+      sendResponse({ ok: res.ok, data });
+    })().catch((e) => {
+      sendResponse({ ok: false, error: String(e) });
+    });
+
+    return true;
+  }
 });

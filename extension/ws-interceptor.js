@@ -4,6 +4,8 @@
   "use strict";
 
   const PREFIX = "__JF_WS__";
+  let lastWs = null;
+  let seqCounter = 1;
 
   function postCapture(dir, data) {
     let str;
@@ -35,6 +37,7 @@
   // Wrap WebSocket.prototype.send
   const origSend = WebSocket.prototype.send;
   WebSocket.prototype.send = function (data) {
+    lastWs = this;
     postCapture("send", data);
     return origSend.call(this, data);
   };
@@ -78,4 +81,36 @@
     }
     return origAddEventListener.call(this, type, listener, options);
   };
+
+  // Track the most recent WebSocket instance on construction
+  const OrigWebSocket = WebSocket;
+  window.WebSocket = function (url, protocols) {
+    const ws = protocols !== undefined
+      ? new OrigWebSocket(url, protocols)
+      : new OrigWebSocket(url);
+    lastWs = ws;
+    return ws;
+  };
+  window.WebSocket.prototype = OrigWebSocket.prototype;
+  window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+  window.WebSocket.OPEN = OrigWebSocket.OPEN;
+  window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+  window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+
+  // Listen for vote requests from content.js
+  window.addEventListener("__JF_VOTE__", function (event) {
+    if (!lastWs || lastWs.readyState !== OrigWebSocket.OPEN) return;
+    var detail = event.detail;
+    if (!detail || !detail.name) return;
+    var payload = JSON.stringify({
+      seq: seqCounter++,
+      opcode: "audience/count-group/increment",
+      params: {
+        name: detail.name,
+        vote: String(detail.vote),
+        times: detail.times || 1,
+      },
+    });
+    lastWs.send(payload);
+  });
 })();
