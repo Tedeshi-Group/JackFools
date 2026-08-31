@@ -1,5 +1,7 @@
 package games
 
+import "context"
+
 // GameHandler is the interface that every mini-game must implement.
 // Each game decides how to detect its events and how to handle them.
 type GameHandler interface {
@@ -32,7 +34,7 @@ type BotnetManagerAPI interface {
 	SetGameTag(tag string)
 
 	// GetContext returns the context for cancellation.
-	GetContext() interface{}
+	GetContext() context.Context
 }
 
 // ClientCommand represents a command sent from coordinator to clients.

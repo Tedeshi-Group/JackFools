@@ -1,5 +1,10 @@
 package games
 
+import (
+	"regexp"
+	"strings"
+)
+
 // GameEvent represents a typed game event.
 type GameEvent struct {
 	Type           string                 // Event type (e.g., "question", "answer_choice").
@@ -51,8 +56,30 @@ type TriviaDeath2ContentFormat struct {
 // QuestionInfo represents extracted question information.
 // This is a generic struct that handlers can use to pass question data.
 type QuestionInfo struct {
-	Prompt    string   // Question text.
-	Choices   []string // Answer choices.
-	RoundType string   // Round type (e.g., "regular", "final").
+	Prompt    string                 // Question text.
+	Choices   []string               // Answer choices.
+	RoundType string                 // Round type (e.g., "regular", "final").
 	Extra     map[string]interface{} // Game-specific extra data.
+}
+
+var tagPattern = regexp.MustCompile(`\[/?[a-zA-Z]+\]`)
+
+// NormalizeQuestionText normalizes question text by removing formatting tags.
+func NormalizeQuestionText(text string) string {
+	if text == "" {
+		return text
+	}
+	normalized := tagPattern.ReplaceAllString(text, "")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	return strings.TrimSpace(normalized)
+}
+
+// NormalizeAnswerText normalizes answer text for matching.
+func NormalizeAnswerText(text string) string {
+	if text == "" {
+		return text
+	}
+	normalized := strings.ToLower(text)
+	nonLetterPattern := regexp.MustCompile(`[^а-яёa-z]`)
+	return nonLetterPattern.ReplaceAllString(normalized, "")
 }

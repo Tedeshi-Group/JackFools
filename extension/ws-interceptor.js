@@ -4,8 +4,34 @@
   "use strict";
 
   const PREFIX = "__JF_WS__";
-  let lastWs = null;
   let seqCounter = 1;
+
+  // Track all open WebSocket instances. Cleaned up on close/error.
+  const openSockets = new Set();
+
+  function registerSocket(ws) {
+    openSockets.add(ws);
+    // Remove from tracking on close or error so stale refs don't accumulate.
+    const cleanup = function () {
+      openSockets.delete(ws);
+    };
+    ws.addEventListener("close", cleanup, { once: true });
+    ws.addEventListener("error", cleanup, { once: true });
+  }
+
+  // Return the best WebSocket for sending: prefer the most recently opened OPEN
+  // socket, fall back to any OPEN socket, return null if none available.
+  function getOpenSocket() {
+    // openSockets iterates in insertion order (most recent last). Walk backwards
+    // to prefer the latest OPEN socket.
+    let best = null;
+    for (const ws of openSockets) {
+      if (ws.readyState === WebSocket.OPEN) {
+        best = ws; // Keep overwriting — last OPEN wins.
+      }
+    }
+    return best;
+  }
 
   function postCapture(dir, data) {
     let str;
@@ -37,7 +63,7 @@
   // Wrap WebSocket.prototype.send
   const origSend = WebSocket.prototype.send;
   WebSocket.prototype.send = function (data) {
-    lastWs = this;
+    registerSocket(this);
     postCapture("send", data);
     return origSend.call(this, data);
   };
@@ -82,13 +108,13 @@
     return origAddEventListener.call(this, type, listener, options);
   };
 
-  // Track the most recent WebSocket instance on construction
+  // Track every new WebSocket instance on construction and on first send.
   const OrigWebSocket = WebSocket;
   window.WebSocket = function (url, protocols) {
     const ws = protocols !== undefined
       ? new OrigWebSocket(url, protocols)
       : new OrigWebSocket(url);
-    lastWs = ws;
+    registerSocket(ws);
     return ws;
   };
   window.WebSocket.prototype = OrigWebSocket.prototype;
@@ -99,8 +125,9 @@
 
   // Listen for vote requests from content.js
   window.addEventListener("__JF_VOTE__", function (event) {
-    if (!lastWs || lastWs.readyState !== OrigWebSocket.OPEN) {
-      console.log("[JF-WS] vote dropped: no open WebSocket", lastWs ? "readyState=" + lastWs.readyState : "null");
+    var ws = getOpenSocket();
+    if (!ws) {
+      console.log("[JF-WS] vote dropped: no open WebSocket (tracked:", openSockets.size, ")");
       return;
     }
     var detail = event.detail;
@@ -115,6 +142,6 @@
       },
     });
     console.log("[JF-WS] sending vote:", payload);
-    lastWs.send(payload);
+    ws.send(payload);
   });
 })();

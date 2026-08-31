@@ -7,9 +7,11 @@ import ( // Начинаем блок импортов.
 	"io"            // Читаем тело ответа HTTP.
 	"log"           // Логируем события.
 	"net/http"      // Отправляем HTTP запросы для загрузки базы ответов.
-	"regexp"        // Используем регулярные выражения для удаления тегов форматирования.
+	"os"            // Читаем локальные файлы.
 	"strings"       // Работаем со строками для обработки тегов игр.
 	"time"          // Устанавливаем таймауты для запросов.
+
+	"jackfools/client/internal/games" // Общие типы игр.
 ) // Закрываем блок импортов.
 
 // WebSocketMessage представляет базовое сообщение от WebSocket сервера.
@@ -23,55 +25,26 @@ type WebSocketMessage struct { // Структура базового сообщ
 	Payload map[string]interface{} `json:"payload"` // Полезная нагрузка сообщения (для обратной совместимости).
 } // Конец WebSocketMessage.
 
-// GameEvent представляет типизированное событие игры.
-type GameEvent struct { // Структура события игры.
-	Type           string                 // Тип события (например, "question", "answer_choice").
-	EventID        string                 // Уникальный ID события.
-	GameTag        string                 // Тег игры (например, "quiplash2").
-	Payload        map[string]interface{} // Полезная нагрузка события.
-	RequiresAnswer bool                   // Требуется ли ответ на это событие.
-} // Конец GameEvent.
+// GameEvent represents a typed game event.
+type GameEvent = games.GameEvent // Конец GameEvent.
 
-// AnswerDatabase представляет базу правильных ответов.
-// Поддерживает два формата:
-// 1. Стандартный: { "games": { "gameTag": { "eventTypes": { "eventType": { "questionId": "answer" } } } } }
-// 2. Прямой для triviadeath2: { "question": "answer" } или { "question": index }
-// 3. Формат с content массивом: { "content": [ { "text": "question", "choices": [ { "correct": true/false, "text": "answer" } ] } ] }
-type AnswerDatabase struct { // Структура базы ответов.
-	Games map[string]GameAnswers `json:"games"` // Карта игр с их ответами (стандартный формат).
-	// Для triviadeath2 также поддерживается прямой формат вопрос->ответ.
-	Questions map[string]interface{} `json:"-"` // Прямые вопросы (парсим как map[string]interface{} для гибкости).
-	// Для финального раунда: вопрос -> массив текстов правильных ответов (несколько правильных ответов).
-	FinalRoundQuestions map[string][]string `json:"-"` // Вопросы финального раунда с текстами правильных ответов.
-} // Конец AnswerDatabase.
+// AnswerDatabase represents a database of correct answers.
+type AnswerDatabase = games.AnswerDatabase // Конец AnswerDatabase.
 
-// TriviaDeath2QuestionItem представляет элемент вопроса из формата с content массивом.
-type TriviaDeath2QuestionItem struct { // Структура элемента вопроса.
-	Text    string               `json:"text"`    // Текст вопроса.
-	ID      string               `json:"id"`      // ID вопроса.
-	Choices []TriviaDeath2Choice `json:"choices"` // Варианты ответов.
-} // Конец TriviaDeath2QuestionItem.
+// TriviaDeath2QuestionItem represents an item from the content array format.
+type TriviaDeath2QuestionItem = games.TriviaDeath2QuestionItem // Конец TriviaDeath2QuestionItem.
 
-// TriviaDeath2Choice представляет вариант ответа.
-type TriviaDeath2Choice struct { // Структура варианта ответа.
-	Text    string `json:"text"`    // Текст варианта ответа.
-	Correct bool   `json:"correct"` // Является ли вариант правильным.
-} // Конец TriviaDeath2Choice.
+// TriviaDeath2Choice represents an answer choice.
+type TriviaDeath2Choice = games.TriviaDeath2Choice // Конец TriviaDeath2Choice.
 
-// TriviaDeath2ContentFormat представляет формат файла с content массивом.
-type TriviaDeath2ContentFormat struct { // Структура формата с content.
-	Content []TriviaDeath2QuestionItem `json:"content"` // Массив вопросов.
-} // Конец TriviaDeath2ContentFormat.
+// TriviaDeath2ContentFormat represents the content array format.
+type TriviaDeath2ContentFormat = games.TriviaDeath2ContentFormat // Конец TriviaDeath2ContentFormat.
 
-// GameAnswers представляет ответы для конкретной игры.
-type GameAnswers struct { // Структура ответов игры.
-	EventTypes map[string]EventAnswers `json:"eventTypes"` // Карта типов событий с ответами.
-} // Конец GameAnswers.
+// GameAnswers represents answers for a specific game.
+type GameAnswers = games.GameAnswers // Конец GameAnswers.
 
-// EventAnswers представляет ответы для конкретного типа события.
-type EventAnswers struct { // Структура ответов события.
-	Answers map[string]string `json:"answers"` // Карта ID вопроса -> ответ.
-} // Конец EventAnswers.
+// EventAnswers represents answers for a specific event type.
+type EventAnswers = games.EventAnswers // Конец EventAnswers.
 
 // parseWebSocketMessage парсит JSON сообщение от WebSocket сервера.
 // Принимает сырые байты сообщения.
@@ -240,6 +213,28 @@ func shouldRequireAnswer(event *GameEvent) bool { // Функция опреде
 					} // Конец проверки playerData.
 				} // Конец проверки audiencePlayer.
 			} // Конец проверки entities.
+
+			// Player events: key == "player:N" с kind == "choices" и responseKey.
+			if key, ok := event.Payload["key"].(string); ok && strings.HasPrefix(key, "player:") { // Если key начинается с "player:".
+				if val, ok := event.Payload["val"].(map[string]interface{}); ok { // Если есть val.
+					if kind, ok := val["kind"].(string); ok && (kind == "choices" || kind == "gridSelecting") { // Если kind == "choices" или "gridSelecting".
+						if kind == "choices" { // Если choices.
+							if responseKey, ok := val["responseKey"].(string); ok && responseKey != "" { // Если есть responseKey.
+								// Проверяем, есть ли choices (варианты ответов) и prompt.
+								if choices, ok := val["choices"].([]interface{}); ok && len(choices) > 0 { // Если есть варианты ответов.
+									if prompt, ok := val["prompt"].(string); ok && prompt != "" { // Если есть prompt.
+										return true // Требует ответа.
+									} // Конец проверки prompt.
+								} // Конец проверки choices.
+							} // Конец проверки responseKey.
+						} else { // gridSelecting.
+							if responseKey, ok := val["responseKey"].(string); ok && responseKey != "" { // Если есть responseKey.
+								return true // Требует ответа.
+							} // Конец проверки responseKey.
+						} // Конец проверки kind.
+					} // Конец проверки kind.
+				} // Конец проверки val.
+			} // Конец проверки player key.
 		} // Конец проверки payload.
 	} // Конец проверки triviadeath2.
 
@@ -319,37 +314,48 @@ func shouldRequireAnswer(event *GameEvent) bool { // Функция опреде
 	} // Конец switch.
 } // Конец shouldRequireAnswer.
 
-// loadAnswerDatabase загружает базу правильных ответов из онлайн-источника.
+// fetchBytes загружает байты по URL или из локального файла.
+// Если source начинается с "http://" или "https://", загружает по HTTP.
+// Иначе читает локальный файл.
+func fetchBytes(source string) ([]byte, error) {
+	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", source, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch %s: %w", source, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		return io.ReadAll(resp.Body)
+	}
+
+	return os.ReadFile(source)
+}
+
+// loadAnswerDatabase загружает базу правильных ответов из URL или локального файла.
 // Принимает URL для загрузки базы ответов.
 // Возвращает базу ответов или ошибку.
-func loadAnswerDatabase(url string) (*AnswerDatabase, error) { // Функция загрузки базы ответов.
-	if url == "" { // Если URL пустой.
+func loadAnswerDatabase(source string) (*AnswerDatabase, error) { // Функция загрузки базы ответов.
+	if source == "" { // Если source пустой.
 		return &AnswerDatabase{Games: make(map[string]GameAnswers)}, nil // Возвращаем пустую базу ответов.
-	} // Конец проверки URL.
+	} // Конец проверки source.
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Создаём контекст с таймаутом 10 секунд.
-	defer cancel()                                                           // Отменяем контекст при выходе из функции.
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil) // Создаём HTTP GET запрос с контекстом.
-	if err != nil {                                              // Если не удалось создать запрос.
-		return nil, fmt.Errorf("failed to create request: %w", err) // Возвращаем ошибку.
-	} // Конец проверки создания запроса.
-
-	client := &http.Client{}    // Создаём HTTP клиент.
-	resp, err := client.Do(req) // Выполняем запрос.
-	if err != nil {             // Если запрос не удался.
-		return nil, fmt.Errorf("failed to fetch answer database: %w", err) // Возвращаем ошибку.
-	} // Конец проверки выполнения запроса.
-	defer resp.Body.Close() // Закрываем тело ответа при выходе из функции.
-
-	if resp.StatusCode != http.StatusOK { // Если статус ответа не 200.
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode) // Возвращаем ошибку.
-	} // Конец проверки статуса.
-
-	body, err := io.ReadAll(resp.Body) // Читаем всё тело ответа.
-	if err != nil {                    // Если не удалось прочитать тело.
-		return nil, fmt.Errorf("failed to read response body: %w", err) // Возвращаем ошибку.
-	} // Конец проверки чтения тела.
+	body, err := fetchBytes(source) // Загружаем байты.
+	if err != nil {                 // Если загрузка не удалась.
+		return nil, fmt.Errorf("failed to load answer database: %w", err) // Возвращаем ошибку.
+	} // Конец проверки загрузки.
 
 	// Сначала проверяем, есть ли поле "content" (формат с массивом вопросов).
 	var contentFormat TriviaDeath2ContentFormat                                                    // Переменная для формата с content.
@@ -363,7 +369,7 @@ func loadAnswerDatabase(url string) (*AnswerDatabase, error) { // Функция
 		// Проходим по всем вопросам и находим правильный ответ.
 		for _, question := range contentFormat.Content { // Проходим по каждому вопросу.
 			// Нормализуем текст вопроса (убираем теги форматирования).
-			normalizedText := normalizeQuestionText(question.Text) // Нормализуем текст вопроса.
+			normalizedText := games.NormalizeQuestionText(question.Text) // Нормализуем текст вопроса.
 
 			// Ищем правильный ответ в choices.
 			for idx, choice := range question.Choices { // Проходим по каждому варианту ответа.
@@ -414,30 +420,11 @@ func loadAnswerDatabase(url string) (*AnswerDatabase, error) { // Функция
 // В финальном раунде может быть несколько правильных ответов для одного вопроса.
 // Принимает URL для загрузки базы ответов.
 // Возвращает базу ответов или ошибку.
-func loadFinalRoundDatabase(url string) (*AnswerDatabase, error) { // Функция загрузки базы финального раунда.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Создаём контекст с таймаутом 30 секунд.
-	defer cancel()                                                           // Отменяем контекст при выходе из функции.
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil) // Создаём HTTP GET запрос с контекстом.
-	if err != nil {                                              // Если не удалось создать запрос.
-		return nil, fmt.Errorf("failed to create request: %w", err) // Возвращаем ошибку.
-	} // Конец проверки создания запроса.
-
-	client := &http.Client{}    // Создаём HTTP клиент.
-	resp, err := client.Do(req) // Выполняем запрос.
-	if err != nil {             // Если запрос не удался.
-		return nil, fmt.Errorf("failed to fetch final round database: %w", err) // Возвращаем ошибку.
-	} // Конец проверки выполнения запроса.
-	defer resp.Body.Close() // Закрываем тело ответа при выходе из функции.
-
-	if resp.StatusCode != http.StatusOK { // Если статус ответа не 200.
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode) // Возвращаем ошибку.
-	} // Конец проверки статуса.
-
-	body, err := io.ReadAll(resp.Body) // Читаем всё тело ответа.
-	if err != nil {                    // Если не удалось прочитать тело.
-		return nil, fmt.Errorf("failed to read response body: %w", err) // Возвращаем ошибку.
-	} // Конец проверки чтения тела.
+func loadFinalRoundDatabase(source string) (*AnswerDatabase, error) {
+	body, err := fetchBytes(source)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load final round database: %w", err)
+	}
 
 	// Парсим формат с content массивом для финального раунда.
 	var contentFormat TriviaDeath2ContentFormat                                                     // Переменная для формата с content.
@@ -455,14 +442,14 @@ func loadFinalRoundDatabase(url string) (*AnswerDatabase, error) { // Функц
 	// Проходим по всем вопросам и находим все правильные ответы.
 	for _, question := range contentFormat.Content { // Проходим по каждому вопросу.
 		// Нормализуем текст вопроса (убираем теги форматирования).
-		normalizedText := normalizeQuestionText(question.Text) // Нормализуем текст вопроса.
+		normalizedText := games.NormalizeQuestionText(question.Text) // Нормализуем текст вопроса.
 
 		// Собираем все тексты правильных ответов.
 		correctTexts := []string{}                // Слайс для текстов правильных ответов.
 		for _, choice := range question.Choices { // Проходим по каждому варианту ответа.
 			if choice.Correct { // Если вариант правильный.
 				// Нормализуем текст ответа для сопоставления (убираем все небуквенные символы, приводим к нижнему регистру).
-				normalizedText := normalizeAnswerText(choice.Text)  // Нормализуем текст ответа.
+				normalizedText := games.NormalizeAnswerText(choice.Text)  // Нормализуем текст ответа.
 				correctTexts = append(correctTexts, normalizedText) // Добавляем нормализованный текст правильного ответа.
 			} // Конец проверки правильности ответа.
 		} // Конец цикла по вариантам ответов.
@@ -488,7 +475,7 @@ func getAutoAnswer(event *GameEvent, db *AnswerDatabase) (string, bool) { // Ф�
 	// Для triviadeath2 сначала проверяем прямой формат (вопрос->ответ).
 	if (event.GameTag == "triviadeath2-tjsp" || strings.Contains(event.GameTag, "triviadeath2")) && db.Questions != nil { // Если это Trivia Death 2 и есть прямые вопросы.
 		// Нормализуем текст вопроса перед поиском (убираем теги форматирования).
-		normalizedQuestion := normalizeQuestionText(event.EventID) // Нормализуем текст вопроса.
+		normalizedQuestion := games.NormalizeQuestionText(event.EventID) // Нормализуем текст вопроса.
 
 		// Ищем ответ по нормализованному тексту вопроса (EventID содержит текст вопроса).
 		if answer, ok := db.Questions[normalizedQuestion]; ok { // Если ответ найден.
@@ -528,50 +515,6 @@ func getAutoAnswer(event *GameEvent, db *AnswerDatabase) (string, bool) { // Ф�
 	return answer, true // Возвращаем найденный ответ и true.
 } // Конец getAutoAnswer.
 
-// normalizeQuestionText нормализует текст вопроса, убирая теги форматирования.
-// Удаляет теги типа [i]...[/i], [b]...[/b] и т.д., оставляя только текст внутри.
-// Принимает текст вопроса.
-// Возвращает нормализованный текст.
-func normalizeQuestionText(text string) string { // Функция нормализации текста вопроса.
-	if text == "" { // Если текст пустой.
-		return text // Возвращаем пустой текст.
-	} // Конец проверки пустого текста.
-
-	normalized := text // Начинаем с исходного текста.
-
-	// Удаляем теги форматирования типа [i]...[/i], [b]...[/b], [u]...[/u] и т.д.
-	// Регулярное выражение ищет [любые_буквы]...[/любые_буквы] и заменяет на содержимое.
-	tagPattern := regexp.MustCompile(`\[/?[a-zA-Z]+\]`)      // Создаём регулярное выражение для поиска тегов.
-	normalized = tagPattern.ReplaceAllString(normalized, "") // Удаляем все теги.
-
-	// Убираем лишние пробелы (двойные, тройные и т.д.).
-	normalized = strings.Join(strings.Fields(normalized), " ") // Нормализуем пробелы.
-
-	// Убираем пробелы в начале и конце.
-	normalized = strings.TrimSpace(normalized) // Убираем пробелы по краям.
-
-	return normalized // Возвращаем нормализованный текст.
-} // Конец normalizeQuestionText.
-
-// normalizeAnswerText нормализует текст ответа для сопоставления.
-// Убирает все пробелы, дефисы и другие небуквенные символы, приводит к нижнему регистру.
-// Принимает текст ответа.
-// Возвращает нормализованный текст (только буквы в нижнем регистре).
-func normalizeAnswerText(text string) string { // Функция нормализации текста ответа.
-	if text == "" { // Если текст пустой.
-		return text // Возвращаем пустой текст.
-	} // Конец проверки пустого текста.
-
-	normalized := strings.ToLower(text) // Приводим к нижнему регистру.
-
-	// Убираем все небуквенные символы (пробелы, дефисы, точки и т.д.), оставляя только буквы.
-	// Используем регулярное выражение для удаления всех символов, кроме букв.
-	nonLetterPattern := regexp.MustCompile(`[^а-яёa-z]`)           // Создаём регулярное выражение для поиска небуквенных символов (включая русские буквы).
-	normalized = nonLetterPattern.ReplaceAllString(normalized, "") // Удаляем все небуквенные символы.
-
-	return normalized // Возвращаем нормализованный текст.
-} // Конец normalizeAnswerText.
-
 // getFinalRoundAnswers получает все тексты правильных ответов для финального раунда.
 // В финальном раунде может быть несколько правильных ответов.
 // Принимает событие игры и базу ответов финального раунда.
@@ -586,7 +529,7 @@ func getFinalRoundAnswers(event *GameEvent, db *AnswerDatabase) ([]string, bool)
 	} // Конец проверки базы.
 
 	// Нормализуем текст вопроса для поиска в базе.
-	normalizedQuestion := normalizeQuestionText(event.EventID) // Нормализуем текст вопроса.
+	normalizedQuestion := games.NormalizeQuestionText(event.EventID) // Нормализуем текст вопроса.
 
 	// Ищем вопрос в базе финального раунда.
 	if correctTexts, ok := db.FinalRoundQuestions[normalizedQuestion]; ok { // Если вопрос найден.

@@ -10,6 +10,7 @@ import ( // Начинаем блок импортов.
 	"os"            // Создаём директории и файлы.
 	"regexp"        // Санитизируем имя действия.
 	"strings"       // Нормализуем/сравниваем токен.
+	"sync"          // Синхронизируем доступ к файлу вопросов.
 	"time"          // Таймауты сервера.
 
 	"jackfools/client/internal/protocol" // Общие структуры протокола.
@@ -47,6 +48,8 @@ type Config struct { // Конфигурация сервера.
 	WriteTimeout time.Duration // Таймаут записи ответа.
 	IdleTimeout  time.Duration // Таймаут простоя соединения.
 } // Конец Config.
+
+var questionsMu sync.RWMutex // Мьютекс для безопасного доступа к файлу questions.json.
 
 func Run(cfg Config) error { // Запускает сервер и блокирует поток до остановки.
 	if strings.TrimSpace(cfg.Addr) == "" { // Проверяем адрес.
@@ -196,6 +199,9 @@ func Run(cfg Config) error { // Запускает сервер и блокир�
 			return // Выходим.
 		} // Конец проверки токена.
 
+		questionsMu.RLock()         // Блокируем для чтения.
+		defer questionsMu.RUnlock() // Разблокируем при выходе.
+
 		data, err := os.ReadFile(questionsFile) // Читаем файл банка вопросов.
 		if err != nil { // Если файл не существует или не читается.
 			writeJSON(w, http.StatusOK, map[string]any{ "ok": true, "questions": []any{} }) // Возвращаем пустой банк.
@@ -234,6 +240,9 @@ func Run(cfg Config) error { // Запускает сервер и блокир�
 			writeJSON(w, http.StatusBadRequest, map[string]any{ "ok": false, "error": "prompt is required" }) // 400.
 			return // Выходим.
 		} // Конец проверки prompt.
+
+		questionsMu.Lock()         // Блокируем для записи.
+		defer questionsMu.Unlock() // Разблокируем при выходе.
 
 		// Загружаем существующий банк.
 		var bank QuestionBank // Банк вопросов.
@@ -309,6 +318,9 @@ func Run(cfg Config) error { // Запускает сервер и блокир�
 			writeJSON(w, http.StatusBadRequest, map[string]any{ "ok": false, "error": "prompt parameter required" }) // 400.
 			return // Выходим.
 		} // Конец проверки prompt.
+
+		questionsMu.RLock()         // Блокируем для чтения.
+		defer questionsMu.RUnlock() // Разблокируем при выходе.
 
 		data, err := os.ReadFile(questionsFile) // Читаем файл.
 		if err != nil { // Если файл не существует.

@@ -85,7 +85,7 @@
     root.appendChild(connStatus);
 
     // Load saved token
-    chrome.storage.local.get("jf_settings", function (data) {
+    function applyLoadedSettings(data) {
       const settings = data.jf_settings || {};
       if (settings.token) {
         tokenInput.value = settings.token;
@@ -93,10 +93,8 @@
       } else {
         setConnStatus(false);
       }
-      if (settings.port) {
-        // port is stored but not shown in overlay — only token matters for user
-      }
-    });
+    }
+    chrome.storage.local.get("jf_settings", applyLoadedSettings);
 
     // --- Quick event button (original functionality) ---
     const quickBtn = document.createElement("button");
@@ -221,13 +219,15 @@
       setConnStatus(false);
       return;
     }
-    chrome.storage.local.get("jf_settings", function (data) {
-      const settings = data.jf_settings || {};
+    function applyToken(settings) {
       settings.token = token;
       chrome.storage.local.set({ jf_settings: settings }, function () {
         setConnStatus(true);
         setStatus("token saved");
       });
+    }
+    chrome.storage.local.get("jf_settings", function (data) {
+      applyToken(data.jf_settings || {});
     });
   }
 

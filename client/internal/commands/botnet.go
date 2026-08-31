@@ -22,6 +22,8 @@ import ( // Начинаем блок импортов.
 
 	_ "jackfools/client/internal/games/generic" // Импортируем для init() регистрации generic handler.
 	_ "jackfools/client/internal/games/fakinit" // Импортируем для init() регистрации Fakin' It handler.
+	_ "jackfools/client/internal/games/tsjp"    // Импортируем для init() регистрации TSJP handler.
+	"jackfools/client/internal/server"          // Общие типы вопросов (QuestionBank).
 ) // Закрываем блок импортов.
 
 // BotnetManager управляет всеми подключениями ботнета.
@@ -32,14 +34,13 @@ type BotnetManager struct { // Структура менеджера ботне�
 	clients          map[int]*websocket.Conn // Карта клиентов по их ID.
 	ctx              context.Context         // Контекст для отмены операций.
 	cancel           context.CancelFunc      // Функция отмены контекста.
-	answerDB         *AnswerDatabase         // База правильных ответов для triviadeath2 (обычные вопросы).
-	finalRoundDB     *AnswerDatabase         // База правильных ответов для triviadeath2 (финальный раунд).
 	answerDBTJSP     *AnswerDatabase         // База правильных ответов для triviadeath2-tjsp (обычные вопросы).
 	finalRoundDBTJSP *AnswerDatabase         // База правильных ответов для triviadeath2-tjsp (финальный раунд).
 	commandChan      chan ClientCommand      // Канал для отправки команд клиентам.
 	gameTag          string                  // Кешированный тег игры (извлекается из первого сообщения).
 	everydayTimes    int                     // Счётчик times для игры Everyday (начинается с 50, увеличивается).
 	currentQuestion  *CurrentQuestion        // Текущий вопрос для обучения.
+	role             string                  // Роль ботов: "player" или "audience".
 } // Конец BotnetManager.
 
 // CurrentQuestion хранит контекст текущего вопроса для обучения.
@@ -47,25 +48,6 @@ type CurrentQuestion struct { // Контекст текущего вопрос�
 	Prompt  string   // Текст вопроса.
 	Choices []string // Варианты ответов.
 } // Конец CurrentQuestion.
-
-// QuestionAnswer — один правильный ответ на вопрос (для банка вопросов).
-type QuestionAnswer struct { // Ответ на вопрос.
-	Text  string `json:"text"`  // Текст ответа.
-	Index int    `json:"index"` // Информационный индекс.
-} // Конец QuestionAnswer.
-
-// QuestionEntry — один вопрос в банке.
-type QuestionEntry struct { // Запись вопроса.
-	Prompt    string           `json:"prompt"`     // Текст вопроса.
-	Answers   []QuestionAnswer `json:"answers"`    // Правильные ответы.
-	SeenCount int              `json:"seen_count"` // Сколько раз вопрос был замечен.
-	LastSeen  int64            `json:"last_seen"`  // Unix timestamp последнего появления (ms).
-} // Конец QuestionEntry.
-
-// QuestionBank — банк вопросов.
-type QuestionBank struct { // Банк вопросов.
-	Questions []QuestionEntry `json:"questions"` // Массив вопросов.
-} // Конец QuestionBank.
 
 // ClientCommand представляет команду, которую координатор отправляет клиентам.
 type ClientCommand struct { // Структура команды клиенту.
@@ -77,9 +59,10 @@ type ClientCommand struct { // Структура команды клиенту.
 
 // Botnet реализует команду botnet.
 // Принимает args — аргументы командной строки после подкоманды "botnet".
-// Формат: botnet <code> [num_clients]
+// Формат: botnet <code> [num_clients] [role]
 // code — обязательный, 4 буквы (любой регистр).
 // num_clients — необязательный, количество клиентов (по умолчанию 10).
+// role — необязательный, "player" или "audience" (по умолчанию "audience").
 func Botnet(args []string) { // Реализация команды botnet.
 	if len(args) < 1 { // Если код не указан.
 		log.Printf("error: code is required") // Пишем в лог.
@@ -121,8 +104,18 @@ func Botnet(args []string) { // Реализация команды botnet.
 		} // Конец проверки максимального значения.
 	} // Конец проверки num_clients.
 
+	// Валидация необязательного аргумента role.
+	role := "audience" // Значение по умолчанию — зрители.
+	if len(args) >= 3 { // Если указан третий аргумент.
+		role = strings.ToLower(args[2]) // Преобразуем к нижнему регистру.
+		if role != "player" && role != "audience" { // Если роль неизвестна.
+			log.Printf("error: role must be 'player' or 'audience', got: %s", args[2]) // Пишем в лог.
+			os.Exit(2)                                                                  // Выходим.
+		} // Конец проверки роли.
+	} // Конец проверки role.
+
 	// Загружаем список хостов из JSON файла.
-	hostsURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/8a72727071a08134eb212a2f5f5df00792107c22/hosts.json" // URL для загрузки списка хостов.
+	hostsURL := defaultHostsURL // URL для загрузки списка хостов.
 	hosts, err := fetchHosts(hostsURL)                                                                                                                 // Загружаем хосты.
 	if err != nil {                                                                                                                                    // Если не удалось загрузить хосты.
 		log.Printf("error: failed to fetch hosts: %v", err) // Логируем ошибку.
@@ -172,37 +165,19 @@ func Botnet(args []string) { // Реализация команды botnet.
 	}() // Запускаем горутину.
 
 	// Загружаем базу ответов для triviadeath2-tjsp (обычные вопросы).
-	answersURLTJSP := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/efdfff41ea60cb6b93cc03cfad09ededefd22f4e/triviadeath2-tjsp-questions.json" // URL для загрузки базы ответов для Trivia Death 2 TJSP.
-	answerDBTJSP, err := loadAnswerDatabase(answersURLTJSP)                                                                                                                        // Загружаем базу ответов для TJSP.
+	answersPathTJSP := "answers/triviadeath2-tjsp-questions.json" // Локальный путь к базе ответов для TJSP.
+	answerDBTJSP, err := loadAnswerDatabase(answersPathTJSP)      // Загружаем базу ответов для TJSP.
 	if err != nil {                                                                                                                                                                // Если не удалось загрузить базу ответов.
 		log.Printf("warning: failed to load TJSP answer database: %v, continuing without auto-answers", err) // Логируем предупреждение.
 		answerDBTJSP = &AnswerDatabase{}                                                                     // Создаём пустую базу ответов.
 	} // Конец проверки загрузки базы ответов.
 
 	// Загружаем базу ответов для triviadeath2-tjsp (финальный раунд).
-	finalRoundURLTJSP := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/ea10557f20c3cb9662ed8842892f163129574f74/triviadeath2-tjsp-final.json" // URL для загрузки базы ответов финального раунда для TJSP.
-	finalRoundDBTJSP, err := loadFinalRoundDatabase(finalRoundURLTJSP)                                                                                                            // Загружаем базу ответов финального раунда для TJSP.
+	finalRoundPathTJSP := "answers/triviadeath2-tjsp-final.json"   // Локальный путь к базе финального раунда для TJSP.
+	finalRoundDBTJSP, err := loadFinalRoundDatabase(finalRoundPathTJSP) // Загружаем базу ответов финального раунда для TJSP.
 	if err != nil {                                                                                                                                                               // Если не удалось загрузить базу ответов финального раунда.
 		log.Printf("warning: failed to load TJSP final round database: %v, continuing without final round auto-answers", err) // Логируем предупреждение.
 		finalRoundDBTJSP = &AnswerDatabase{                                                                                   // Создаём пустую базу ответов.
-			FinalRoundQuestions: make(map[string][]string), // Инициализируем карту вопросов финального раунда.
-		} // Конец создания базы.
-	} // Конец проверки загрузки базы ответов финального раунда.
-
-	// Загружаем базу ответов для triviadeath2 (обычные вопросы).
-	answersURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/bfa1c18b64e1f13997d34950a5353b7c0839cbda/triviadeath2-questions.json" // URL для загрузки базы ответов для Trivia Death 2.
-	answerDB, err := loadAnswerDatabase(answersURL)                                                                                                                       // Загружаем базу ответов.
-	if err != nil {                                                                                                                                                       // Если не удалось загрузить базу ответов.
-		log.Printf("warning: failed to load answer database: %v, continuing without auto-answers", err) // Логируем предупреждение.
-		answerDB = &AnswerDatabase{}                                                                    // Создаём пустую базу ответов.
-	} // Конец проверки загрузки базы ответов.
-
-	// Загружаем базу ответов для triviadeath2 (финальный раунд).
-	finalRoundURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/bfa1c18b64e1f13997d34950a5353b7c0839cbda/triviadeath2-final.json" // URL для загрузки базы ответов финального раунда.
-	finalRoundDB, err := loadFinalRoundDatabase(finalRoundURL)                                                                                                           // Загружаем базу ответов финального раунда.
-	if err != nil {                                                                                                                                                      // Если не удалось загрузить базу ответов финального раунда.
-		log.Printf("warning: failed to load final round database: %v, continuing without final round auto-answers", err) // Логируем предупреждение.
-		finalRoundDB = &AnswerDatabase{                                                                                  // Создаём пустую базу ответов.
 			FinalRoundQuestions: make(map[string][]string), // Инициализируем карту вопросов финального раунда.
 		} // Конец создания базы.
 	} // Конец проверки загрузки базы ответов финального раунда.
@@ -212,19 +187,25 @@ func Botnet(args []string) { // Реализация команды botnet.
 		clients:          make(map[int]*websocket.Conn), // Инициализируем карту клиентов.
 		ctx:              ctx,                           // Устанавливаем контекст.
 		cancel:           cancel,                        // Устанавливаем функцию отмены.
-		answerDB:         answerDB,                      // Устанавливаем базу ответов для triviadeath2 (обычные вопросы).
-		finalRoundDB:     finalRoundDB,                  // Устанавливаем базу ответов для triviadeath2 (финальный раунд).
 		answerDBTJSP:     answerDBTJSP,                  // Устанавливаем базу ответов для triviadeath2-tjsp (обычные вопросы).
 		finalRoundDBTJSP: finalRoundDBTJSP,              // Устанавливаем базу ответов для triviadeath2-tjsp (финальный раунд).
 		commandChan:      make(chan ClientCommand, 100), // Создаём канал для команд (буфер 100).
-		everydayTimes:    50,                            // Инициализируем счётчик times для Everyday (начинаем с 50).
+		// TODO: The reason for starting at 50 is unknown. The `times` parameter in
+		// `audience/g-counter/increment` controls how much each bot's vote increments
+		// the counter. Starting at 50 gives each bot's first vote more weight, but
+		// the exact reason for choosing 50 (vs 1 or another value) is unclear — it
+		// may have been tuned empirically to achieve a desired counter offset, or it
+		// could be a leftover from experimentation. If the game works correctly with
+		// a different starting value, this should be revisited.
+		everydayTimes:    50,                            // Инициализируем счётчик times для Everyday (начинаем с 50, см. TODO выше).
 		gameTag:          roomInfo.AppTag,               // Устанавливаем тег игры из информации о комнате (если доступен).
+		role:             role,                          // Устанавливаем роль ботов.
 	} // Конец создания менеджера.
 
 	// Подключаем координатора.
-	coordinatorID := uuid.New().String()                                                                  // Генерируем UUID для координатора.
-	coordConn, err := connectAsAudience(ctx, roomInfo.AudienceHost, strings.ToUpper(code), coordinatorID) // Подключаемся как зритель.
-	if err != nil {                                                                                       // Если подключение не удалось.
+	coordinatorID := uuid.New().String()                                                              // Генерируем UUID для координатора.
+	coordConn, err := connectAsRole(ctx, roomInfo.AudienceHost, strings.ToUpper(code), coordinatorID, role) // Подключаемся в указанной роли.
+	if err != nil {                                                                                   // Если подключение не удалось.
 		log.Printf("error: failed to connect coordinator: %v", err) // Логируем ошибку.
 		os.Exit(2)                                                  // Выходим с кодом ошибки.
 	} // Конец проверки подключения координатора.
@@ -243,8 +224,8 @@ func Botnet(args []string) { // Реализация команды botnet.
 		go func(clientID int) { // Запускаем горутину для каждого клиента.
 			defer wg.Done() // Уменьшаем счётчик WaitGroup при выходе из горутины.
 
-			clientUUID := uuid.New().String()                                                                   // Генерируем UUID для клиента.
-			clientConn, err := connectAsAudience(ctx, roomInfo.AudienceHost, strings.ToUpper(code), clientUUID) // Подключаемся как зритель.
+			clientUUID := uuid.New().String()                                                             // Генерируем UUID для клиента.
+			clientConn, err := connectAsRole(ctx, roomInfo.AudienceHost, strings.ToUpper(code), clientUUID, role) // Подключаемся в указанной роли.
 			if err != nil {                                                                                     // Если подключение не удалось.
 				log.Printf("error: failed to connect client %d: %v", clientID, err) // Логируем ошибку.
 				return                                                              // Выходим из горутины.
@@ -267,6 +248,7 @@ func Botnet(args []string) { // Реализация команды botnet.
 	fmt.Printf("  Active host: %s\n", activeHost)              // Выводим найденный хост.
 	fmt.Printf("  Audience host: %s\n", roomInfo.AudienceHost) // Выводим хост аудитории.
 	fmt.Printf("  App tag: %s\n", roomInfo.AppTag)             // Выводим тег приложения.
+	fmt.Printf("  Role: %s\n", role)                           // Выводим роль ботов.
 	fmt.Printf("  Clients: %d\n", numClients)                  // Выводим количество клиентов.
 	fmt.Printf("  Press Ctrl+C to stop\n")                     // Выводим подсказку.
 
@@ -275,6 +257,63 @@ func Botnet(args []string) { // Реализация команды botnet.
 
 	log.Printf("botnet stopped") // Логируем остановку ботнета.
 } // Конец Botnet.
+
+// connectAsRole подключается к комнате игры в указанной роли (player или audience).
+func connectAsRole(ctx context.Context, host, code, userID, role string) (*websocket.Conn, error) {
+	if role == "player" {
+		return connectAsPlayer(ctx, host, code, userID)
+	}
+	return connectAsAudience(ctx, host, code, userID)
+}
+
+// connectAsPlayer создаёт WebSocket подключение к комнате игры как игрок.
+func connectAsPlayer(ctx context.Context, host, code, userID string) (*websocket.Conn, error) {
+	playerName := generateRandomAudienceName() // Генерируем имя игрока.
+
+	wsURL := url.URL{
+		Scheme:   "wss",
+		Host:     host,
+		Path:     fmt.Sprintf("/api/v2/audience/%s/play", code),
+		RawQuery: fmt.Sprintf("role=player&name=%s&format=json&user-id=%s", url.QueryEscape(playerName), userID),
+	}
+
+	log.Printf("debug: connecting WebSocket as player to %s", wsURL.String())
+
+	header := make(http.Header)
+	header.Set("Host", host)
+	header.Set("Pragma", "no-cache")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 YaBrowser/25.12.0.0 Safari/537.36")
+	header.Set("Origin", "https://jackbox.fun")
+	header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	header.Set("Accept-Language", "ru,en;q=0.9")
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout:  10 * time.Second,
+		EnableCompression: true,
+		Subprotocols:      []string{"ecast-v0"},
+	}
+
+	conn, resp, err := dialer.Dial(wsURL.String(), header)
+	if err != nil {
+		if resp != nil {
+			log.Printf("debug: player connection failed: %v (status: %d)", err, resp.StatusCode)
+		} else {
+			log.Printf("debug: player connection failed: %v", err)
+		}
+		return nil, fmt.Errorf("failed to connect as player: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		conn.Close()
+		return nil, fmt.Errorf("context canceled before connection established")
+	default:
+	}
+
+	log.Printf("debug: WebSocket connected successfully as player (user-id: %s)", userID)
+	return conn, nil
+}
 
 // connectAsAudience создаёт WebSocket подключение к комнате игры как зритель.
 // Принимает контекст, домен хоста аудитории, код комнаты и UUID пользователя.
@@ -479,147 +518,34 @@ func runClient(conn *websocket.Conn, clientID int, manager *BotnetManager) { // 
 // Принимает WebSocket соединение и команду от координатора.
 // Возвращает ошибку, если отправка не удалась.
 func sendClientResponse(conn *websocket.Conn, cmd ClientCommand) error { // Функция отправки ответа клиента.
-	var message map[string]interface{} // Переменная для сообщения.
+	var ( // Объявляем переменные для сообщения и ошибки.
+		message map[string]interface{} // Сообщение для отправки.
+		err     error                 // Ошибка построения сообщения.
+	) // Конец объявления переменных.
 
-	// Проверяем, является ли это ответом для Everyday.
-	if gameTag, ok := cmd.Payload["gameTag"].(string); ok && gameTag == "everyday" { // Если это Everyday.
-		// Получаем opcode, key и times из payload.
-		opcode, _ := cmd.Payload["opcode"].(string) // Получаем opcode.
-		key, _ := cmd.Payload["key"].(string)       // Получаем key.
-		times, _ := cmd.Payload["times"].(int)      // Получаем times.
+	gameTag, _ := cmd.Payload["gameTag"].(string) // Извлекаем gameTag из payload.
 
-		// Формируем сообщение в формате Everyday.
-		message = map[string]interface{}{ // Создаём карту для сообщения.
-			"seq":    1,      // Порядковый номер сообщения (начинаем с 1).
-			"opcode": opcode, // Код операции для Everyday.
-			"params": map[string]interface{}{ // Параметры сообщения.
-				"key":   key,   // Key из события.
-				"times": times, // Times (начинается с 50, увеличивается).
-			}, // Конец параметров.
-		} // Конец создания сообщения.
-	} else if gameTag, ok := cmd.Payload["gameTag"].(string); ok && (gameTag == "triviadeath2-tjsp" || strings.Contains(gameTag, "triviadeath2")) { // Если это Trivia Death 2.
-		// Проверяем, является ли это новым форматом (triviadeath2 без -tjsp).
-		isNewFormat, _ := cmd.Payload["isNewFormat"].(bool)                                             // Получаем флаг нового формата.
-		isFinalRound, _ := cmd.Payload["isFinalRound"].(bool)                                           // Получаем флаг финального раунда.
-		if isNewFormat && gameTag != "triviadeath2-tjsp" && strings.Contains(gameTag, "triviadeath2") { // Если это новый формат (triviadeath2, не tjsp).
-			if isFinalRound { // Если это финальный раунд нового формата.
-				// Для финального раунда нового формата используем индексы через запятую.
-				voteString := cmd.Answer // Используем строку ответа напрямую (уже содержит индексы через запятую, например "0,1").
+	switch { // Диспетчер по типу игры.
+	case gameTag == "everyday": // Если это Everyday.
+		message, err = buildEverydayMessage(cmd) // Строим сообщение Everyday.
+	case gameTag == "triviadeath2-tjsp" || strings.Contains(gameTag, "triviadeath2"): // Если это TriviaDeath2.
+		playerMode, _ := cmd.Payload["playerMode"].(bool)   // Флаг player-режима.
+		isFinalRound, _ := cmd.Payload["isFinalRound"].(bool) // Флаг финального раунда.
+		switch { // Диспетчер по подтипу TriviaDeath2.
+		case playerMode: // Player-режим (object/update).
+			message, err = buildTD2PlayerMessage(cmd) // Строим сообщение player.
+		case isFinalRound: // Финальный раунд (старый/новый формат).
+			message, err = buildTD2FinalRoundMessage(cmd) // Строим сообщение финального раунда.
+		default: // Обычный раунд audience (старый/новый формат).
+			message, err = buildTD2AudienceMessage(cmd) // Строим сообщение audience.
+		} // Конец диспетчера TriviaDeath2.
+	default: // Все остальные игры (Poll Position, generic и т.д.).
+		message, err = buildDefaultMessage(cmd) // Строим сообщение по умолчанию.
+	} // Конец диспетчера.
 
-				// Формируем сообщение в формате Trivia Death 2 для финального раунда (новый формат).
-				message = map[string]interface{}{ // Создаём карту для сообщения.
-					"seq":    1,                                // Порядковый номер сообщения (начинаем с 1).
-					"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
-					"params": map[string]interface{}{ // Параметры сообщения.
-						"name":  "TriviaDeath2 Vote", // Имя группы подсчёта (новый формат).
-						"vote":  voteString,          // Индексы выбранных ответов через запятую (например, "0,1").
-						"times": 1,                   // Количество раз (всегда 1).
-					}, // Конец параметров.
-				} // Конец создания сообщения.
-			} else { // Если это обычный раунд нового формата.
-				// Для нового формата используем ключ ответа вместо индекса.
-				answerKey, ok := cmd.Payload["answerKey"].(string) // Получаем ключ ответа.
-				if !ok {                                           // Если ключ не найден.
-					// Используем Answer как ключ.
-					answerKey = cmd.Answer // Используем Answer как ключ.
-				} // Конец проверки ключа.
-
-				// Формируем сообщение в формате Trivia Death 2 (новый формат).
-				message = map[string]interface{}{ // Создаём карту для сообщения.
-					"seq":    1,                                // Порядковый номер сообщения (начинаем с 1).
-					"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
-					"params": map[string]interface{}{ // Параметры сообщения.
-						"name":  "TriviaDeath2 Vote", // Имя группы подсчёта (новый формат).
-						"vote":  answerKey,           // Ключ выбранного ответа (например, "Ризеншнауцер").
-						"times": 1,                   // Количество раз (всегда 1).
-					}, // Конец параметров.
-				} // Конец создания сообщения.
-			} // Конец проверки финального раунда.
-		} else if isFinalRound { // Если это финальный раунд (старый формат triviadeath2-tjsp).
-			// Для финального раунда используем строку с индексами через запятую (например, "1,2").
-			voteString := cmd.Answer // Используем строку ответа напрямую (уже содержит индексы через запятую).
-
-			// Формируем сообщение в формате Trivia Death 2 для финального раунда.
-			message = map[string]interface{}{ // Создаём карту для сообщения.
-				"seq":    1,                                // Порядковый номер сообщения (начинаем с 1).
-				"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
-				"params": map[string]interface{}{ // Параметры сообщения.
-					"name":  "TriviaDeath2AudienceChoice", // Имя группы подсчёта.
-					"vote":  voteString,                   // Индексы выбранных ответов через запятую (например, "1,2").
-					"times": 1,                            // Количество раз (всегда 1).
-				}, // Конец параметров.
-			} // Конец создания сообщения.
-		} else { // Если это обычный раунд (старый формат triviadeath2-tjsp).
-			// Для обычного раунда используем один индекс.
-			answerIndex, ok := cmd.Payload["answerIndex"].(int) // Получаем индекс ответа.
-			if !ok {                                            // Если индекс не найден.
-				// Пытаемся преобразовать из строки.
-				if answerStr := cmd.Answer; answerStr != "" { // Если есть строка ответа.
-					if idx, err := strconv.Atoi(answerStr); err == nil { // Если удалось преобразовать в число.
-						answerIndex = idx // Устанавливаем индекс.
-					} else { // Если преобразование не удалось.
-						return fmt.Errorf("invalid answer index for Trivia Death 2: %s", answerStr) // Возвращаем ошибку.
-					} // Конец проверки преобразования.
-				} else { // Если строки ответа нет.
-					return fmt.Errorf("answer index not found for Trivia Death 2") // Возвращаем ошибку.
-				} // Конец проверки строки ответа.
-			} // Конец проверки индекса.
-
-			// Формируем сообщение в формате Trivia Death 2 для обычного раунда.
-			message = map[string]interface{}{ // Создаём карту для сообщения.
-				"seq":    1,                                // Порядковый номер сообщения (начинаем с 1).
-				"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
-				"params": map[string]interface{}{ // Параметры сообщения.
-					"name":  "TriviaDeath2AudienceChoice",   // Имя группы подсчёта.
-					"vote":  fmt.Sprintf("%d", answerIndex), // Индекс выбранного ответа (в виде строки).
-					"times": 1,                              // Количество раз (всегда 1).
-				}, // Конец параметров.
-			} // Конец создания сообщения.
-		} // Конец проверки финального раунда.
-	} else if gameTag, ok := cmd.Payload["gameTag"].(string); ok && gameTag == "pollposition" { // Если это Poll Position.
-		// Получаем vote, opcode и name из payload.
-		vote, _ := cmd.Payload["vote"].(string)     // Получаем vote ("0" или "1").
-		opcode, _ := cmd.Payload["opcode"].(string) // Получаем opcode.
-		name, _ := cmd.Payload["name"].(string)     // Получаем name группы подсчёта.
-
-		// Если vote не найден в payload, используем Answer.
-		if vote == "" { // Если vote не найден.
-			vote = cmd.Answer // Используем Answer как vote.
-		} // Конец проверки vote.
-
-		// Если opcode не найден, используем значение по умолчанию.
-		if opcode == "" { // Если opcode не найден.
-			opcode = "audience/count-group/increment" // Устанавливаем opcode по умолчанию.
-		} // Конец проверки opcode.
-
-		// Если name не найден, используем значение по умолчанию.
-		if name == "" { // Если name не найден.
-			name = "Poll Position Vote" // Устанавливаем name по умолчанию.
-		} // Конец проверки name.
-
-		// Формируем сообщение в формате Poll Position.
-		message = map[string]interface{}{ // Создаём карту для сообщения.
-			"seq":    1,      // Порядковый номер сообщения (начинаем с 1).
-			"opcode": opcode, // Код операции для Poll Position.
-			"params": map[string]interface{}{ // Параметры сообщения.
-				"name":  name, // Имя группы подсчёта.
-				"vote":  vote, // Vote ("0" или "1").
-				"times": 1,    // Количество раз (всегда 1).
-			}, // Конец параметров.
-		} // Конец создания сообщения.
-	} else { // Если это не Trivia Death 2 и не Poll Position, используем общий формат.
-		// Формируем JSON сообщение для отправки.
-		message = map[string]interface{}{ // Создаём карту для сообщения.
-			"type":    cmd.Type,    // Устанавливаем тип команды.
-			"eventId": cmd.EventID, // Устанавливаем ID события.
-			"answer":  cmd.Answer,  // Устанавливаем ответ.
-		} // Конец создания сообщения.
-
-		// Добавляем дополнительные данные из payload, если они есть.
-		for k, v := range cmd.Payload { // Проходим по дополнительным данным.
-			message[k] = v // Добавляем данные в сообщение.
-		} // Конец цикла.
-	} // Конец проверки типа игры.
+	if err != nil { // Если построение сообщения вернуло ошибку.
+		return err // Возвращаем ошибку.
+	} // Конец проверки ошибки.
 
 	// Кодируем сообщение в JSON.
 	data, err := json.Marshal(message) // Кодируем сообщение в JSON.
@@ -634,6 +560,192 @@ func sendClientResponse(conn *websocket.Conn, cmd ClientCommand) error { // Фу
 
 	return nil // Возвращаем nil (ошибки нет).
 } // Конец sendClientResponse.
+
+// buildEverydayMessage строит сообщение для игры Everyday.
+// Извлекает opcode, key и times из payload и формирует JSON.
+func buildEverydayMessage(cmd ClientCommand) (map[string]interface{}, error) { // Построение сообщения Everyday.
+	opcode, _ := cmd.Payload["opcode"].(string) // Код операции для Everyday.
+	key, _ := cmd.Payload["key"].(string)       // Key из события.
+	times, _ := cmd.Payload["times"].(int)      // Times (начинается с 50, увеличивается).
+
+	message := map[string]interface{}{ // Создаём карту для сообщения.
+		"seq":    1,      // Порядковый номер сообщения (начинаем с 1).
+		"opcode": opcode, // Код операции для Everyday.
+		"params": map[string]interface{}{ // Параметры сообщения.
+			"key":   key,   // Key из события.
+			"times": times, // Times (начинается с 50, увеличивается).
+		}, // Конец параметров.
+	} // Конец создания сообщения.
+
+	return message, nil // Возвращаем сообщение без ошибки.
+} // Конец buildEverydayMessage.
+
+// buildTD2PlayerMessage строит сообщение object/update для player-режима TriviaDeath2.
+// Обрабатывает действия: submit, select/unselect, select_grid.
+func buildTD2PlayerMessage(cmd ClientCommand) (map[string]interface{}, error) { // Построение сообщения player.
+	responseKey, _ := cmd.Payload["responseKey"].(string) // Ключ ответа (choose:N, grid:N, finalround:N).
+	action, _ := cmd.Payload["action"].(string)          // Действие игрока.
+
+	val := map[string]interface{}{"action": action} // Создаём val с действием.
+
+	switch action { // Проверяем действие.
+	case "submit": // Отправка ответа.
+		if choice, ok := cmd.Payload["choice"].(int); ok { // Если есть choice.
+			val["choice"] = choice // Устанавливаем choice.
+		} // Конец проверки choice.
+	case "select", "unselect": // Выбор/отмена варианта (final round).
+		if choice, ok := cmd.Payload["choice"].(int); ok { // Если есть choice.
+			val["choice"] = choice // Устанавливаем choice.
+		} // Конец проверки choice.
+	case "select_grid": // Выбор ячейки в сетке (шпаги).
+		if x, ok := cmd.Payload["x"].(int); ok { // Если есть x.
+			val["x"] = x // Устанавливаем x.
+		} // Конец проверки x.
+		if y, ok := cmd.Payload["y"].(int); ok { // Если есть y.
+			val["y"] = y // Устанавливаем y.
+		} // Конец проверки y.
+	} // Конец switch.
+
+	message := map[string]interface{}{ // Создаём карту для сообщения.
+		"seq":    1,              // Порядковый номер сообщения.
+		"opcode": "object/update", // Код операции для player.
+		"params": map[string]interface{}{ // Параметры сообщения.
+			"key": responseKey, // Ключ ответа.
+			"val": val,         // Значение с действием.
+		}, // Конец параметров.
+	} // Конец создания сообщения.
+
+	return message, nil // Возвращаем сообщение без ошибки.
+} // Конец buildTD2PlayerMessage.
+
+// buildTD2AudienceMessage строит сообщение audience/count-group/increment для обычного раунда TriviaDeath2.
+// Поддерживает как новый формат (triviadeath2), так и старый (triviadeath2-tjsp).
+func buildTD2AudienceMessage(cmd ClientCommand) (map[string]interface{}, error) { // Построение сообщения audience.
+	gameTag, _ := cmd.Payload["gameTag"].(string)                          // Тег игры.
+	isNewFormat, _ := cmd.Payload["isNewFormat"].(bool)                    // Флаг нового формата.
+
+	if isNewFormat && gameTag != "triviadeath2-tjsp" && strings.Contains(gameTag, "triviadeath2") { // Новый формат (triviadeath2, не tjsp).
+		answerKey, ok := cmd.Payload["answerKey"].(string) // Ключ ответа из payload.
+		if !ok { // Если ключ не найден в payload.
+			answerKey = cmd.Answer // Используем Answer как ключ.
+		} // Конец проверки ключа.
+
+		message := map[string]interface{}{ // Создаём карту для сообщения.
+			"seq":    1,                                // Порядковый номер сообщения.
+			"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
+			"params": map[string]interface{}{ // Параметры сообщения.
+				"name":  "TriviaDeath2 Vote", // Имя группы подсчёта (новый формат).
+				"vote":  answerKey,           // Ключ выбранного ответа.
+				"times": 1,                   // Количество раз (всегда 1).
+			}, // Конец параметров.
+		} // Конец создания сообщения.
+
+		return message, nil // Возвращаем сообщение без ошибки.
+	} // Конец проверки нового формата.
+
+	// Старый формат (triviadeath2-tjsp): используем числовой индекс ответа.
+	answerIndex, ok := cmd.Payload["answerIndex"].(int) // Получаем индекс ответа.
+	if !ok { // Если индекс не найден.
+		if answerStr := cmd.Answer; answerStr != "" { // Если есть строка ответа.
+			if idx, err := strconv.Atoi(answerStr); err == nil { // Если удалось преобразовать в число.
+				answerIndex = idx // Устанавливаем индекс.
+			} else { // Если преобразование не удалось.
+				return nil, fmt.Errorf("invalid answer index for Trivia Death 2: %s", answerStr) // Возвращаем ошибку.
+			} // Конец проверки преобразования.
+		} else { // Если строки ответа нет.
+			return nil, fmt.Errorf("answer index not found for Trivia Death 2") // Возвращаем ошибку.
+		} // Конец проверки строки ответа.
+	} // Конец проверки индекса.
+
+	message := map[string]interface{}{ // Создаём карту для сообщения.
+		"seq":    1,                                // Порядковый номер сообщения.
+		"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
+		"params": map[string]interface{}{ // Параметры сообщения.
+			"name":  "TriviaDeath2AudienceChoice",   // Имя группы подсчёта (старый формат).
+			"vote":  fmt.Sprintf("%d", answerIndex), // Индекс выбранного ответа (в виде строки).
+			"times": 1,                              // Количество раз (всегда 1).
+		}, // Конец параметров.
+	} // Конец создания сообщения.
+
+	return message, nil // Возвращаем сообщение без ошибки.
+} // Конец buildTD2AudienceMessage.
+
+// buildTD2FinalRoundMessage строит сообщение audience/count-group/increment для финального раунда TriviaDeath2.
+// Поддерживает как новый формат (triviadeath2), так и старый (triviadeath2-tjsp).
+func buildTD2FinalRoundMessage(cmd ClientCommand) (map[string]interface{}, error) { // Построение сообщения финального раунда.
+	gameTag, _ := cmd.Payload["gameTag"].(string)   // Тег игры.
+	isNewFormat, _ := cmd.Payload["isNewFormat"].(bool) // Флаг нового формата.
+
+	voteString := cmd.Answer // Индексы выбранных ответов через запятую (например, "0,1" или "1,2").
+
+	// Определяем имя группы подсчёта в зависимости от формата.
+	name := "TriviaDeath2AudienceChoice" // Имя по умолчанию (старый формат).
+	if isNewFormat && gameTag != "triviadeath2-tjsp" && strings.Contains(gameTag, "triviadeath2") { // Новый формат.
+		name = "TriviaDeath2 Vote" // Имя группы для нового формата.
+	} // Конец определения имени.
+
+	message := map[string]interface{}{ // Создаём карту для сообщения.
+		"seq":    1,                                // Порядковый номер сообщения.
+		"opcode": "audience/count-group/increment", // Код операции для подтверждения ответа зрителя.
+		"params": map[string]interface{}{ // Параметры сообщения.
+			"name":  name,        // Имя группы подсчёта.
+			"vote":  voteString,  // Индексы выбранных ответов через запятую.
+			"times": 1,           // Количество раз (всегда 1).
+		}, // Конец параметров.
+	} // Конец создания сообщения.
+
+	return message, nil // Возвращаем сообщение без ошибки.
+} // Конец buildTD2FinalRoundMessage.
+
+// buildDefaultMessage строит сообщение для всех остальных игр (Poll Position, generic и т.д.).
+// Для Poll Position формирует audience/count-group/increment.
+// Для остальных — общий формат с type/eventId/answer.
+func buildDefaultMessage(cmd ClientCommand) (map[string]interface{}, error) { // Построение сообщения по умолчанию.
+	gameTag, _ := cmd.Payload["gameTag"].(string) // Тег игры.
+
+	if gameTag == "pollposition" { // Если это Poll Position.
+		vote, _ := cmd.Payload["vote"].(string)     // Vote ("0" или "1").
+		opcode, _ := cmd.Payload["opcode"].(string) // Код операции.
+		name, _ := cmd.Payload["name"].(string)     // Имя группы подсчёта.
+
+		if vote == "" { // Если vote не найден в payload.
+			vote = cmd.Answer // Используем Answer как vote.
+		} // Конец проверки vote.
+
+		if opcode == "" { // Если opcode не найден.
+			opcode = "audience/count-group/increment" // Устанавливаем opcode по умолчанию.
+		} // Конец проверки opcode.
+
+		if name == "" { // Если name не найден.
+			name = "Poll Position Vote" // Устанавливаем name по умолчанию.
+		} // Конец проверки name.
+
+		message := map[string]interface{}{ // Создаём карту для сообщения.
+			"seq":    1,      // Порядковый номер сообщения (начинаем с 1).
+			"opcode": opcode, // Код операции для Poll Position.
+			"params": map[string]interface{}{ // Параметры сообщения.
+				"name":  name, // Имя группы подсчёта.
+				"vote":  vote, // Vote ("0" или "1").
+				"times": 1,    // Количество раз (всегда 1).
+			}, // Конец параметров.
+		} // Конец создания сообщения.
+
+		return message, nil // Возвращаем сообщение без ошибки.
+	} // Конец проверки Poll Position.
+
+	// Общий формат для остальных игр.
+	message := map[string]interface{}{ // Создаём карту для сообщения.
+		"type":    cmd.Type,    // Устанавливаем тип команды.
+		"eventId": cmd.EventID, // Устанавливаем ID события.
+		"answer":  cmd.Answer,  // Устанавливаем ответ.
+	} // Конец создания сообщения.
+
+	for k, v := range cmd.Payload { // Добавляем дополнительные данные из payload.
+		message[k] = v // Добавляем данные в сообщение.
+	} // Конец цикла.
+
+	return message, nil // Возвращаем сообщение без ошибки.
+} // Конец buildDefaultMessage.
 
 // generateRandomAudienceName генерирует случайное имя для зрителя.
 // Возвращает строку из 4 заглавных букв (например, "AUDI").
@@ -714,12 +826,12 @@ func tryLearnFromMessage(raw []byte, manager *BotnetManager) { // Функция
 		} // Конец проверки.
 
 		// Сопоставляем тексты ответов с индексами в choices.
-		answers := []QuestionAnswer{} // Ответы для сохранения.
+		answers := []server.QuestionAnswer{} // Ответы для сохранения.
 		for _, text := range answerTexts { // Проходим по текстам ответов.
 			text = strings.TrimSpace(text) // Убираем пробелы.
 			for i, choice := range q.Choices { // Проходим по вариантам.
 				if choice == text { // Если текст совпадает.
-					answers = append(answers, QuestionAnswer{Text: text, Index: i}) // Добавляем ответ.
+					answers = append(answers, server.QuestionAnswer{Text: text, Index: i}) // Добавляем ответ.
 					break // Прерываем внутренний цикл.
 				} // Конец проверки совпадения.
 			} // Конец цикла по вариантам.
@@ -734,11 +846,11 @@ func tryLearnFromMessage(raw []byte, manager *BotnetManager) { // Функция
 
 // saveQuestionToFile сохраняет вопрос с ответами в questions.json.
 // Принимает текст вопроса и слайс ответов.
-func saveQuestionToFile(prompt string, answers []QuestionAnswer) { // Функция сохранения вопроса в файл.
+func saveQuestionToFile(prompt string, answers []server.QuestionAnswer) { // Функция сохранения вопроса в файл.
 	const questionsFile = "questions.json" // Путь к файлу банка вопросов.
 
 	// Загружаем существующий банк.
-	bank := QuestionBank{} // Банк вопросов.
+	bank := server.QuestionBank{} // Банк вопросов.
 	data, readErr := os.ReadFile(questionsFile) // Читаем файл.
 	if readErr == nil { // Если файл существует.
 		_ = json.Unmarshal(data, &bank) // Игнорируем ошибку парсинга.
@@ -770,7 +882,7 @@ func saveQuestionToFile(prompt string, answers []QuestionAnswer) { // Функц
 	} // Конец цикла.
 
 	if !found { // Если вопрос новый.
-		bank.Questions = append(bank.Questions, QuestionEntry{ // Добавляем.
+		bank.Questions = append(bank.Questions, server.QuestionEntry{ // Добавляем.
 			Prompt:    prompt,    // Текст вопроса.
 			Answers:   answers,   // Ответы.
 			SeenCount: 1,         // Первое появление.

@@ -195,6 +195,7 @@ See `internal/games/fakinit/handler.go` for a complete example implementing:
 | Game | Package | Status |
 |------|---------|--------|
 | Trivia Death 2 | `commands/handlers.go` | Legacy (switch) |
+| Trivia Death 2 TJSP | `games/tsjp/` | Modular |
 | Quiplash 2 | `commands/handlers.go` | Legacy (switch) |
 | Everyday | `commands/handlers.go` | Legacy (switch) |
 | Poll Position | `commands/handlers.go` | Legacy (switch) |

